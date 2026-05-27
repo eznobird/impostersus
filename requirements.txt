@@ -5,4 +5,5 @@ simple-websocket>=1.0.0
 
 # Production WSGI stack (used on Render; ignored when running `python server.py` locally)
 gunicorn>=21.2.0
-eventlet>=0.35.2
+gevent>=23.9.0
+gevent-websocket>=0.10.1

@@ -58,9 +58,9 @@ service page. That's your website.
 |---|---|---|
 | `runtime` | python | Tells Render to use Python (version from `runtime.txt`) |
 | `buildCommand` | `pip install -r requirements.txt` | Installs Flask, gunicorn, eventlet, etc. |
-| `startCommand` | `gunicorn --worker-class eventlet -w 1 …` | Production WSGI server with WebSocket support |
+| `startCommand` | `gunicorn --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker …` | Production WSGI server with WebSocket support |
 | `PYTHON_VERSION` | 3.11.9 | Stable Python release |
-| `SOCKETIO_ASYNC_MODE` | eventlet | Switches Flask-SocketIO to its production mode |
+| `SOCKETIO_ASYNC_MODE` | gevent | Switches Flask-SocketIO to its production mode |
 | `JWT_SECRET` | auto-generated | Render injects a long random string — no hard-coded secret |
 | `plan` | free | $0/month, sleeps after 15 min idle |
 
