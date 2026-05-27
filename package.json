@@ -1,0 +1,19 @@
+{
+  "name": "tsp-route-optimizer",
+  "version": "1.0.0",
+  "description": "Route optimizer using TSP with traffic awareness",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

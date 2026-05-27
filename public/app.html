@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Route Optimizer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="app-page">
+
+  <!-- Navbar -->
+  <header class="navbar">
+    <div class="navbar-brand">
+      <svg width="24" height="24" viewBox="0 0 48 48" fill="none">
+        <circle cx="24" cy="24" r="24" fill="#2563eb"/>
+        <path d="M24 10C18.477 10 14 14.477 14 20c0 8 10 18 10 18s10-10 10-18c0-5.523-4.477-10-10-10zm0 13a3 3 0 110-6 3 3 0 010 6z" fill="white"/>
+      </svg>
+      Route Optimizer
+    </div>
+    <div class="navbar-right">
+      <div class="sync-indicator" id="syncIndicator">
+        <span class="sync-dot" id="syncDot"></span>
+        <span id="syncText">Connecting…</span>
+        <span class="presence-count" id="presenceCount" title="Users online"></span>
+      </div>
+      <span id="userBadge" class="user-badge"></span>
+      <button id="logoutBtn" class="btn btn-ghost btn-sm">Logout</button>
+    </div>
+  </header>
+
+  <!-- Layout -->
+  <div class="app-layout">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+
+      <!-- Waypoints section -->
+      <div class="sidebar-section">
+        <div class="section-header">
+          <h3>Waypoints <span id="wpCount" class="count-badge">0</span></h3>
+          <button id="addModeBtn" class="btn btn-outline btn-sm">+ Add</button>
+        </div>
+        <div id="waypointList" class="waypoint-list">
+          <p class="empty-hint">Click "+ Add" then tap the map</p>
+        </div>
+        <button id="clearAllBtn" class="btn btn-danger btn-sm btn-full hidden">
+          Clear All Waypoints
+        </button>
+      </div>
+
+      <!-- Traffic section -->
+      <div class="sidebar-section">
+        <h3>Traffic Conditions</h3>
+        <div class="traffic-grid">
+          <button class="traffic-btn active" data-mult="1.0">
+            <span class="traffic-dot" style="background:#16a34a"></span> Free Flow
+          </button>
+          <button class="traffic-btn" data-mult="1.3">
+            <span class="traffic-dot" style="background:#ca8a04"></span> Light
+          </button>
+          <button class="traffic-btn" data-mult="1.7">
+            <span class="traffic-dot" style="background:#d97706"></span> Moderate
+          </button>
+          <button class="traffic-btn" data-mult="2.5">
+            <span class="traffic-dot" style="background:#dc2626"></span> Heavy
+          </button>
+        </div>
+        <p id="trafficDesc" class="traffic-desc">No delays expected — optimal travel times</p>
+      </div>
+
+      <!-- Algorithm picker -->
+      <div class="sidebar-section">
+        <h3>Algorithm</h3>
+        <div class="algo-grid">
+          <button class="algo-btn active" data-algo="optimal" type="button">
+            <span class="algo-icon">⚙️</span>
+            <div class="algo-text">
+              <div class="algo-name">Optimal</div>
+              <div class="algo-sub">Held-Karp DP</div>
+            </div>
+          </button>
+          <button class="algo-btn" data-algo="heuristic" type="button">
+            <span class="algo-icon">⚡</span>
+            <div class="algo-text">
+              <div class="algo-name">Heuristic</div>
+              <div class="algo-sub">NN + 2-opt</div>
+            </div>
+          </button>
+        </div>
+        <p id="algoDesc" class="algo-desc">Finds the shortest possible loop — slower for many stops.</p>
+      </div>
+
+      <!-- Optimize button -->
+      <div class="sidebar-section">
+        <button id="optimizeBtn" class="btn btn-primary btn-full">
+          Optimize Route (TSP)
+        </button>
+        <p class="optimize-hint">Picks the fastest path between every pair, then finds the shortest-time loop</p>
+      </div>
+
+      <!-- Results -->
+      <div id="resultsSection" class="sidebar-section hidden">
+        <h3>Optimization Results</h3>
+        <div id="routeResults" class="route-results"></div>
+        <button id="clearRouteBtn" class="btn btn-ghost btn-sm btn-full">Clear Route</button>
+      </div>
+
+      <!-- Admin Panel (admin only) -->
+      <div id="adminPanel" class="sidebar-section admin-section hidden">
+        <h3 class="admin-heading">
+          <span class="admin-icon">👑</span> Admin Panel
+        </h3>
+        <div class="section-header">
+          <h4 class="admin-subheading">
+            Guest Accounts <span id="userCount" class="count-badge admin-count">0</span>
+          </h4>
+          <button id="createUserBtn" class="btn btn-outline btn-sm admin-create-btn">+ New</button>
+        </div>
+        <div id="userList" class="user-list"></div>
+      </div>
+
+    </aside>
+
+    <!-- Map -->
+    <main id="map"></main>
+
+  </div>
+
+  <!-- Add-mode banner -->
+  <div id="addBanner" class="add-banner hidden">
+    📍 Click on the map to add a waypoint &nbsp;·&nbsp;
+    <button onclick="document.getElementById('addModeBtn').click()" class="banner-cancel">Cancel (Esc)</button>
+  </div>
+
+  <!-- Create-guest modal -->
+  <div id="userModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>👑 Create Guest Account</h2>
+        <button class="modal-close" onclick="closeUserModal()" type="button">✕</button>
+      </div>
+      <form id="createUserForm" class="modal-form">
+        <div class="form-group">
+          <label for="newUsername">Username</label>
+          <input type="text" id="newUsername" autocomplete="off"
+                 placeholder="3–24 chars: letters, digits, _ -" required>
+        </div>
+        <div class="form-group">
+          <label for="newPassword">Password</label>
+          <input type="text" id="newPassword" autocomplete="off"
+                 placeholder="At least 4 characters" required>
+          <p class="form-hint">Visible so admin can share with the guest.</p>
+        </div>
+        <div id="userModalError" class="alert alert-error hidden"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost"  onclick="closeUserModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create Account</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Loading overlay -->
+  <div id="loadingOverlay" class="loading-overlay hidden">
+    <div class="loading-card">
+      <div class="spinner-large"></div>
+      <p id="loadingText">Calculating optimal route…</p>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

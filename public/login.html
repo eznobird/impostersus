@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Route Optimizer — Sign In</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="login-page">
+  <div class="login-bg"></div>
+  <div class="login-container">
+    <div class="login-card">
+      <div class="login-header">
+        <div class="login-logo">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="24" r="24" fill="#2563eb"/>
+            <path d="M24 10C18.477 10 14 14.477 14 20c0 8 10 18 10 18s10-10 10-18c0-5.523-4.477-10-10-10zm0 13a3 3 0 110-6 3 3 0 010 6z" fill="white"/>
+          </svg>
+        </div>
+        <h1>Route Optimizer</h1>
+        <p>TSP-powered route planning with traffic awareness</p>
+      </div>
+
+      <form id="loginForm" class="login-form" novalidate>
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username"
+            placeholder="Enter username" autocomplete="username" required>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password"
+            placeholder="Enter password" autocomplete="current-password" required>
+        </div>
+        <div id="loginError" class="alert alert-error hidden"></div>
+        <button type="submit" id="loginBtn" class="btn btn-primary btn-full">
+          <span id="loginBtnText">Sign In</span>
+          <span id="loginSpinner" class="btn-spinner hidden"></span>
+        </button>
+      </form>
+
+      <div class="demo-section">
+        <p class="demo-label">Quick demo login:</p>
+        <div class="demo-buttons">
+          <button type="button" class="demo-btn" onclick="fillDemo('admin','admin123')">
+            <span class="role-badge role-admin">ADMIN</span>
+            admin / admin123
+          </button>
+        </div>
+        <p class="demo-note">
+          👤 Guest accounts must be created by the admin.
+        </p>
+      </div>
+    </div>
+
+    <p class="login-footer">
+      Routing data by <a href="https://project-osrm.org" target="_blank">OSRM</a> &amp;
+      <a href="https://www.openstreetmap.org" target="_blank">OpenStreetMap</a>
+    </p>
+  </div>
+
+  <script src="/js/login.js"></script>
+</body>
+</html>

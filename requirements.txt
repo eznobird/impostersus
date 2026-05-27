@@ -1,0 +1,8 @@
+flask>=2.3.0
+PyJWT>=2.8.0
+flask-socketio>=5.3.0
+simple-websocket>=1.0.0
+
+# Production WSGI stack (used on Render; ignored when running `python server.py` locally)
+gunicorn>=21.2.0
+eventlet>=0.35.2

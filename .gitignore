@@ -1,0 +1,24 @@
+# Runtime data (re-created on each server start)
+users.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+.env.local
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Claude / Cowork local artifacts
+.claude/
