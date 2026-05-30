@@ -5,9 +5,12 @@ const state = {
   markerMap:    {},   // id → L.Marker
   routeLayer:   null,
   addMode:      false,
+  centerMode:   false,         // 🏛️ "place big center" mode (admin only)
   trafficMult:  1.0,
   trafficLabel: 'Free Flow',
-  algorithm:    'optimal',   // 'optimal' (Held-Karp) | 'heuristic' (NN + 2-opt)
+  trafficReason:'',
+  autoTraffic:  true,           // 🛰️ live mode is the default
+  algorithm:    'optimal',
   token:        localStorage.getItem('token'),
   user:         JSON.parse(localStorage.getItem('user') || 'null')
 };
@@ -20,6 +23,13 @@ let map;
 /* Chanthaburi, Thailand */
 const DEFAULT_CENTER = [12.6113, 102.1036];
 const DEFAULT_ZOOM   = 13;
+
+/* Thailand bounding box (rough — verified with Nominatim country code) */
+const THAILAND_BBOX = { south: 5.5, north: 20.5, west: 97.3, east: 105.7 };
+function isInThailandBBox(lat, lng) {
+  return lat >= THAILAND_BBOX.south && lat <= THAILAND_BBOX.north
+      && lng >= THAILAND_BBOX.west  && lng <= THAILAND_BBOX.east;
+}
 
 /* ════════════════════════════════════════════════════════════════
    INIT
@@ -63,6 +73,7 @@ function setupAdminPanel() {
   document.getElementById('adminPanel').classList.remove('hidden');
   document.getElementById('createUserBtn').addEventListener('click', openUserModal);
   document.getElementById('createUserForm').addEventListener('submit', handleCreateUser);
+  document.getElementById('setCenterBtn').addEventListener('click', toggleCenterMode);
 
   // Close modal on backdrop click + Esc
   document.getElementById('userModal').addEventListener('click', e => {
@@ -167,43 +178,102 @@ function setupSidebar() {
   document.getElementById('clearAllBtn').addEventListener('click', clearAll);
   document.getElementById('optimizeBtn').addEventListener('click', optimize);
   document.getElementById('clearRouteBtn').addEventListener('click', clearRoute);
+  document.getElementById('cancelOptimizeBtn').addEventListener('click', cancelOptimize);
 
   document.querySelectorAll('.traffic-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.traffic-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      state.trafficMult = parseFloat(btn.dataset.mult);
-      const labels = {
-        '1.0': ['Free Flow',       'No delays expected — best-case travel times'],
-        '1.3': ['Light Traffic',   'Minor slowdowns — ~30% longer than free flow'],
-        '1.7': ['Moderate Traffic','Noticeable congestion — ~70% longer travel time'],
-        '2.5': ['Heavy Traffic',   'Severe congestion — routes take 2.5× longer']
-      };
-      const [label, desc] = labels[btn.dataset.mult];
-      state.trafficLabel = label;
-      document.getElementById('trafficDesc').textContent = desc;
+
+      if (btn.dataset.mult === 'auto') {
+        state.autoTraffic = true;
+        applyLiveTraffic();
+      } else {
+        state.autoTraffic   = false;
+        state.trafficMult   = parseFloat(btn.dataset.mult);
+        const labels = {
+          '1.0': ['Free Flow',       'No delays — best-case travel times'],
+          '1.3': ['Light Traffic',   'Minor slowdowns — ~30% longer than free flow'],
+          '1.7': ['Moderate Traffic','Noticeable congestion — ~70% longer travel time'],
+          '2.5': ['Heavy Traffic',   'Severe congestion — routes take 2.5× longer']
+        };
+        const [label, desc] = labels[btn.dataset.mult];
+        state.trafficLabel  = label;
+        state.trafficReason = 'manual override';
+        document.getElementById('trafficDesc').textContent = desc;
+      }
     });
   });
+
+  // Auto-refresh live traffic every 60s while Auto mode is active
+  applyLiveTraffic();
+  setInterval(() => { if (state.autoTraffic) applyLiveTraffic(); }, 60_000);
+
+  // Benchmark this machine's Held-Karp speed now, and re-check every minute
+  scheduleCalibration();
 
   // Algorithm picker
   document.querySelectorAll('.algo-btn').forEach(btn => {
     btn.addEventListener('click', () => {
+      if (btn.classList.contains('disabled')) {     // Held-Karp blocked past the cap
+        showToast(`Held-Karp is disabled above ${HELDKARP_MAX_N} stops — heuristic only.`);
+        return;
+      }
       document.querySelectorAll('.algo-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       state.algorithm = btn.dataset.algo;
-      const descs = {
-        'optimal':   'Finds the shortest possible loop — slower for many stops.',
-        'heuristic': 'Fast greedy search — usually within a few percent of the best loop.'
-      };
-      document.getElementById('algoDesc').textContent = descs[state.algorithm];
+      updateAlgoDesc();         // shows correct copy incl. the n>15 fallback note
     });
   });
 }
 
 function setupKeyboard() {
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && state.addMode) toggleAddMode();
+    if (e.key === 'Escape') {
+      if (state.addMode)    toggleAddMode();
+      if (state.centerMode) toggleCenterMode();
+    }
   });
+}
+
+/* ════════════════════════════════════════════════════════════════
+   LIVE TRAFFIC  —  time-of-day / day-of-week model
+   Public OSRM doesn't expose real-time traffic, so we estimate
+   the current level from local time using realistic urban patterns
+   for Chanthaburi-sized cities. Auto-refreshes every minute.
+════════════════════════════════════════════════════════════════ */
+function detectLiveTraffic() {
+  const now    = new Date();
+  const day    = now.getDay();              // 0 = Sun … 6 = Sat
+  const hour   = now.getHours();
+  const minute = now.getMinutes();
+  const dow    = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day];
+  const timeStr = `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
+  const weekend = (day === 0 || day === 6);
+
+  let mult, label, reason;
+  if (weekend) {
+    if      (hour >= 11 && hour < 14) { mult = 1.4; label = 'Moderate';  reason = 'weekend lunch hours'; }
+    else if (hour >=  9 && hour < 19) { mult = 1.2; label = 'Light';     reason = 'weekend daytime'; }
+    else                              { mult = 1.0; label = 'Free Flow'; reason = 'weekend off-peak'; }
+  } else {
+    if      (hour >=  7 && hour < 10) { mult = 2.5; label = 'Heavy';     reason = 'morning rush hour'; }
+    else if (hour >= 16 && hour < 19) { mult = 2.5; label = 'Heavy';     reason = 'evening rush hour'; }
+    else if (hour >= 11 && hour < 13) { mult = 1.4; label = 'Moderate';  reason = 'lunch hour'; }
+    else if (hour >=  6 && hour < 22) { mult = 1.2; label = 'Light';     reason = 'weekday daytime'; }
+    else                              { mult = 1.0; label = 'Free Flow'; reason = 'weekday overnight'; }
+  }
+  return { mult, label, reason, dow, timeStr };
+}
+
+function applyLiveTraffic() {
+  const live = detectLiveTraffic();
+  state.trafficMult   = live.mult;
+  state.trafficLabel  = live.label;
+  state.trafficReason = live.reason;
+  const desc = `🛰️ Live: ${live.label} · ${live.reason} (${live.dow} ${live.timeStr})`;
+  const el = document.getElementById('trafficDesc');
+  if (el) el.textContent = desc;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -285,9 +355,10 @@ function updateSync(connected) {
 }
 
 /* ════════════════════════════════════════════════════════════════
-   ADD MODE
+   ADD MODE  /  CENTER MODE
 ════════════════════════════════════════════════════════════════ */
 function toggleAddMode() {
+  if (state.centerMode) toggleCenterMode();   // mutually exclusive
   state.addMode = !state.addMode;
   const btn    = document.getElementById('addModeBtn');
   const banner = document.getElementById('addBanner');
@@ -305,15 +376,70 @@ function toggleAddMode() {
   }
 }
 
+function toggleCenterMode() {
+  if (state.addMode) toggleAddMode();          // mutually exclusive
+  state.centerMode = !state.centerMode;
+  const btn    = document.getElementById('setCenterBtn');
+  const banner = document.getElementById('addBanner');
+  const mapEl  = document.getElementById('map');
+  if (state.centerMode) {
+    btn.textContent = '✕ Cancel';
+    btn.classList.replace('btn-outline', 'btn-danger');
+    banner.querySelector('span, *') || (banner.innerHTML =
+      '🏛️ Click on the map to place the BIG CENTER &nbsp;·&nbsp;' +
+      '<button class="banner-cancel" onclick="document.getElementById(\'setCenterBtn\').click()">Cancel (Esc)</button>'
+    );
+    banner.innerHTML =
+      '🏛️ Click on the map to place the BIG CENTER &nbsp;·&nbsp;' +
+      '<button class="banner-cancel" onclick="document.getElementById(\'setCenterBtn\').click()">Cancel (Esc)</button>';
+    banner.classList.remove('hidden');
+    banner.classList.add('center-banner');
+    mapEl.classList.add('add-mode');
+  } else {
+    btn.textContent = 'Set Big Center on map';
+    btn.classList.replace('btn-danger', 'btn-outline');
+    banner.classList.add('hidden');
+    banner.classList.remove('center-banner');
+    // Restore the normal banner contents for next add-mode session
+    banner.innerHTML =
+      '📍 Click on the map to add a waypoint &nbsp;·&nbsp;' +
+      '<button onclick="document.getElementById(\'addModeBtn\').click()" class="banner-cancel">Cancel (Esc)</button>';
+    mapEl.classList.remove('add-mode');
+  }
+}
+
 /* ════════════════════════════════════════════════════════════════
    WAYPOINT FLOW  —  emit to server, listen for echo
 ════════════════════════════════════════════════════════════════ */
 async function onMapClick(e) {
-  if (!state.addMode) return;
+  if (!state.addMode && !state.centerMode) return;
   const { lat, lng } = e.latlng;
-  const id   = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  const name = await reverseGeocode(lat, lng);
-  socket.emit('add_waypoint', { id, lat, lng, name });
+
+  if (!isInThailandBBox(lat, lng)) {
+    showToast('🚫 Pin must be inside Thailand');
+    return;
+  }
+  const geo = await reverseGeocodeWithCountry(lat, lng);
+  if (geo.countryCode && geo.countryCode !== 'th') {
+    showToast(`🚫 That spot is in ${geo.country || 'another country'} — only Thailand is allowed`);
+    return;
+  }
+
+  const isCenter = state.centerMode;
+  const id = isCenter
+    ? `center-${Date.now()}`
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+  socket.emit('add_waypoint', {
+    id,
+    lat,
+    lng,
+    name: isCenter ? `🏛️ ${geo.name}` : geo.name,
+    type: isCenter ? 'center' : 'normal'
+  });
+
+  // Auto-exit center mode after one placement (only one center allowed)
+  if (isCenter) toggleCenterMode();
 }
 
 function deleteWaypoint(id) {
@@ -356,7 +482,7 @@ function clearRoute() { clearRouteLocal(); }   // public alias
 function rebuildMarkerNumbers() {
   serverWaypoints.forEach((wp, idx) => {
     const m = state.markerMap[wp.id];
-    if (m) m.setIcon(makeIcon(idx + 1, wp.ownerRole));
+    if (m) m.setIcon(makeIcon(idx + 1, wp.ownerRole, wp.type));
   });
 }
 
@@ -383,6 +509,8 @@ function updateWaypointList() {
   const list  = document.getElementById('waypointList');
   const count = serverWaypoints.length;
   document.getElementById('wpCount').textContent = count;
+  updateAlgoEstimates();
+  updateBigCenterStatus();
 
   if (count === 0) {
     list.innerHTML = '<p class="empty-hint">Click "+ Add" then tap the map</p>';
@@ -390,19 +518,24 @@ function updateWaypointList() {
   }
 
   list.innerHTML = serverWaypoints.map((wp, i) => {
+    const isCenter  = wp.type === 'center';
     const isAdmin   = wp.ownerRole === 'admin';
     const canDel    = canRemove(wp);
     const deleteBtn = canDel
       ? `<button class="wp-delete" onclick="deleteWaypoint('${wp.id}')" title="Remove">✕</button>`
       : `<span class="wp-locked" title="Admin pin — guests can't remove">🔒</span>`;
 
+    const itemClass = isCenter ? ' center-owned' : (isAdmin ? ' admin-owned' : '');
+    const numContent = isCenter ? '🏛️' : (isAdmin ? '★' : i + 1);
+    const numClass   = isCenter ? ' center-num' : (isAdmin ? ' admin-num' : '');
+
     return `
-      <div class="waypoint-item${isAdmin ? ' admin-owned' : ''}">
-        <div class="wp-number${isAdmin ? ' admin-num' : ''}">
-          ${isAdmin ? '★' : i + 1}
-        </div>
+      <div class="waypoint-item${itemClass}">
+        <div class="wp-number${numClass}">${numContent}</div>
         <div class="wp-info">
-          <div class="wp-name" title="${wp.name}">${wp.name}</div>
+          <div class="wp-name" title="${wp.name}">
+            ${isCenter ? '<span class="big-center-tag">BIG CENTER</span> ' : ''}${wp.name}
+          </div>
           <div class="wp-meta">
             <span class="wp-owner ${isAdmin ? 'admin-owner' : 'guest-owner'}">
               ${isAdmin ? '👑 ' : ''}${wp.owner}
@@ -415,10 +548,37 @@ function updateWaypointList() {
   }).join('');
 }
 
+function updateBigCenterStatus() {
+  const el = document.getElementById('bigCenterState');
+  if (!el) return;
+  const center = serverWaypoints.find(w => w.type === 'center');
+  if (center) {
+    el.textContent = `Active: ${center.name.replace(/^🏛️\s*/, '')}`;
+    el.classList.add('active');
+  } else {
+    el.textContent = 'Not set';
+    el.classList.remove('active');
+  }
+}
+
 /* ════════════════════════════════════════════════════════════════
    MARKERS  —  admin pins are SPECIAL
 ════════════════════════════════════════════════════════════════ */
-function makeIcon(number, ownerRole) {
+function makeIcon(number, ownerRole, type) {
+  // Big Center pin — unique, must stand out hard
+  if (type === 'center') {
+    return L.divIcon({
+      html: `<div class="map-marker center-pin">
+               <span class="pin-crown-big">🏛️</span>
+               <span class="pin-num">${number}</span>
+             </div>`,
+      className: '',
+      iconSize:    [56, 56],
+      iconAnchor:  [28, 28],
+      popupAnchor: [0, -30]
+    });
+  }
+  // Regular admin pin
   const isAdmin = ownerRole === 'admin';
   const html = isAdmin
     ? `<div class="map-marker admin-pin">
@@ -437,12 +597,24 @@ function makeIcon(number, ownerRole) {
 
 function createMarker(wp, number) {
   const marker = L.marker([wp.lat, wp.lng], {
-    icon:      makeIcon(number, wp.ownerRole),
+    icon:      makeIcon(number, wp.ownerRole, wp.type),
     draggable: canMove(wp)
   });
 
-  marker.on('dragend', e => {
+  marker.on('dragend', async e => {
     const { lat, lng } = e.target.getLatLng();
+    // Snap back if the user dragged the pin out of Thailand
+    if (!isInThailandBBox(lat, lng)) {
+      e.target.setLatLng([wp.lat, wp.lng]);
+      showToast('🚫 Pins can only be inside Thailand');
+      return;
+    }
+    const geo = await reverseGeocodeWithCountry(lat, lng);
+    if (geo.countryCode && geo.countryCode !== 'th') {
+      e.target.setLatLng([wp.lat, wp.lng]);
+      showToast(`🚫 That spot is in ${geo.country} — only Thailand is allowed`);
+      return;
+    }
     socket.emit('move_waypoint', { id: wp.id, lat, lng });
   });
 
@@ -509,11 +681,18 @@ function twoOpt(route, matrix) {
   return route;
 }
 
-// Heuristic baseline — used for comparison vs the optimum
+// Heuristic baseline — multi-start nearest-neighbour + 2-opt.
+// (Proven, no pathological loops. 2-opt alone is typically within a few % of
+//  optimum, and for n ≤ 20 the exact Held-Karp result is used anyway.)
 function heuristicTSP(matrix) {
   const n = matrix.length;
   let bestRoute = null, bestCost = Infinity;
-  for (let start = 0; start < n; start++) {
+  // For very large n, sampling a subset of starts keeps it snappy.
+  const starts = (n > 30)
+    ? Array.from({ length: 12 }, (_, k) => Math.floor(k * n / 12))
+    : Array.from({ length: n }, (_, k) => k);
+
+  for (const start of starts) {
     const r = nearestNeighbor(matrix, start);
     if (r.length !== n) continue;
     twoOpt(r, matrix);
@@ -536,20 +715,25 @@ function heuristicTSP(matrix) {
  *
  * Returns the provably-optimal Hamiltonian cycle starting and ending at 0.
  */
-function heldKarp(matrix) {
+// Async so it can YIELD to the event loop periodically — otherwise n≈18-20
+// freezes the whole tab for tens of seconds. `onProgress(fraction)` (0..1)
+// lets the caller animate a real compute progress bar.
+async function heldKarp(matrix, onProgress) {
   const n = matrix.length;
   if (n === 1) return { route: [0], cost: 0 };
   if (n === 2) return { route: [0, 1], cost: matrix[0][1] + matrix[1][0] };
 
   const FULL = (1 << n) - 1;
   const SIZE = (1 << n) * n;
-  const dp     = new Float64Array(SIZE);
+  // Float32Array halves memory vs Float64Array; precision is plenty for seconds.
+  const dp     = new Float32Array(SIZE);
   const parent = new Int16Array(SIZE);
   dp.fill(Infinity);
   parent.fill(-1);
 
   dp[(1 << 0) * n + 0] = 0;
 
+  let lastYield = performance.now();
   for (let mask = 1; mask <= FULL; mask++) {
     if (!(mask & 1)) continue;                   // every state must include city 0
     for (let i = 0; i < n; i++) {
@@ -567,6 +751,12 @@ function heldKarp(matrix) {
           parent[idx] = i;
         }
       }
+    }
+    // Every ~40 ms, hand the thread back so the UI (progress bar, clicks) breathes
+    if (performance.now() - lastYield > 40) {
+      if (onProgress) onProgress(mask / FULL);
+      await new Promise(r => setTimeout(r, 0));
+      lastYield = performance.now();
     }
   }
 
@@ -591,47 +781,92 @@ function heldKarp(matrix) {
   return { route, cost: bestCost };
 }
 
-function solveTSP(rawMatrix, multiplier, mode = 'optimal') {
-  const n   = rawMatrix.length;
-  const BIG = 1e9;
+// Solve TSP in a Web Worker so the main UI thread NEVER freezes and the
+// progress bar can update smoothly. Falls back to the in-page algorithm
+// only if Workers aren't available.
+function solveTSPInWorker(rawMatrix, multiplier, mode, onProgress) {
   const matrix = rawMatrix.map(row =>
-    row.map(d => (d === null || d === undefined ? BIG : d * multiplier))
+    row.map(d => (d === null || d === undefined ? 1e9 : d * multiplier))
   );
 
-  // Heuristic-only mode
-  if (mode === 'heuristic' || n > 15) {
+  if (typeof Worker === 'undefined') {
+    // Extremely unlikely in modern browsers, but fall back gracefully
+    return solveTSPFallback(matrix, mode, onProgress);
+  }
+
+  return new Promise((resolve, reject) => {
+    const worker = new Worker('/js/tsp-worker.js');
+    _activeWorker = worker;                      // exposed so Cancel can terminate it
+    const requestId = Math.random().toString(36).slice(2);
+
+    const cleanup = () => { worker.terminate(); if (_activeWorker === worker) _activeWorker = null; };
+
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.requestId !== requestId) return;
+      if (m.type === 'progress') {
+        if (onProgress) onProgress(m.fraction);
+      } else if (m.type === 'done') {
+        cleanup();
+        const r = m.result;
+        resolve({
+          route:         r?.route || [],
+          cost:          r?.cost ?? Infinity,
+          algorithm:     m.algorithm,
+          mode:          m.mode,
+          heuristicCost: m.heuristicCost
+        });
+      } else if (m.type === 'error') {
+        cleanup();
+        reject(new Error(m.message));
+      }
+    };
+    worker.onerror = (err) => {
+      cleanup();
+      reject(new Error('TSP worker crashed: ' + (err.message || 'unknown')));
+    };
+
+    worker.postMessage({ matrix, mode, requestId });
+  });
+}
+
+// Cancellation handles shared across the optimize flow
+let _activeWorker   = null;   // current TSP worker, if any
+let _optimizeAbort  = null;   // AbortController for in-flight fetches
+let _optimizeCanceled = false;
+
+function cancelOptimize() {
+  _optimizeCanceled = true;
+  if (_activeWorker)  { _activeWorker.terminate(); _activeWorker = null; }
+  if (_optimizeAbort) { try { _optimizeAbort.abort(); } catch {} }
+  cancelProgressAnimation();
+  stopStageTicker();
+  hideProgressUI();
+  showToast('Optimization canceled');
+}
+
+// Non-worker fallback (uses in-page async heldKarp + heuristicTSP)
+async function solveTSPFallback(matrix, mode, onProgress) {
+  const n = matrix.length;
+  if (mode === 'heuristic' || n > HELDKARP_MAX_N) {
     const h = heuristicTSP(matrix);
     return {
-      route:     h?.route || Array.from({ length: n }, (_, i) => i),
-      cost:      h?.cost ?? Infinity,
-      algorithm: 'Nearest-Neighbour + 2-opt',
-      mode:      'heuristic',
-      exactCost: null
+      route:     h?.route || [], cost: h?.cost ?? Infinity,
+      algorithm: 'NN + 2-opt', mode: 'heuristic', heuristicCost: null
     };
   }
-
-  // Optimal mode — also runs heuristic so we can show the gap.
   const heur  = heuristicTSP(matrix);
-  const exact = heldKarp(matrix);
-  if (exact) {
-    return {
-      route:         exact.route,
-      cost:          exact.cost,
-      algorithm:     'Held-Karp DP',
-      mode:          'optimal',
-      heuristicCost: heur ? heur.cost : null
-    };
-  }
-
-  // Last-ditch fallback if Held-Karp can't reach all cities
-  return {
-    route:     heur?.route || Array.from({ length: n }, (_, i) => i),
-    cost:      heur?.cost ?? Infinity,
-    algorithm: 'Nearest-Neighbour + 2-opt',
-    mode:      'heuristic',
-    exactCost: null
-  };
+  const exact = await heldKarp(matrix, onProgress);
+  return exact
+    ? { route: exact.route, cost: exact.cost,
+        algorithm: 'Held-Karp DP', mode: 'optimal',
+        heuristicCost: heur ? heur.cost : null }
+    : { route: heur?.route || [], cost: heur?.cost ?? Infinity,
+        algorithm: 'NN + 2-opt', mode: 'heuristic', heuristicCost: null };
 }
+
+// Public entry point
+const solveTSP = solveTSPInWorker;
 
 /* ════════════════════════════════════════════════════════════════
    OPTIMIZE FLOW
@@ -642,49 +877,128 @@ async function optimize() {
     return;
   }
 
-  const pairCount = serverWaypoints.length * (serverWaypoints.length - 1) / 2;
-  showLoading(`Fetching time-optimal routes for ${pairCount} pairs (live traffic = ${state.trafficLabel})…`);
+  const n        = serverWaypoints.length;
+  const pairs    = n * (n - 1) / 2;
+  const estMs    = estimateAlgoTimeMs(state.algorithm, n) || 3000;
+  const fetchMs  = Math.ceil(pairs / 8) * 250;
+
+  // If it's going to take a while, give the user a chance to bail
+  if (estMs > 30_000 &&
+      !confirm(`Optimizing ${n} waypoints will take about ${fmtEstimate(estMs)} ` +
+               `(${pairs} road pairs to fetch). Continue?`)) {
+    return;
+  }
+
+  // Fresh cancellation state for this run
+  _optimizeCanceled = false;
+  _optimizeAbort = new AbortController();
+  const signal = _optimizeAbort.signal;
+
+  showProgressUI('Optimizing route…');
+  setProgressStage('fetch', 5,
+    `Fetching ${pairs} road pair${pairs === 1 ? '' : 's'} from OSRM (live traffic = ${state.trafficLabel})…`);
+  // Asymptotic creep toward 88% — never sticks even if the fetch runs long
+  animateProgressAsymptotic(88, Math.max(2000, fetchMs * 0.8),
+    `Fetching ${pairs} road pairs from OSRM`);
 
   try {
-    // Time-aware pairwise matrix: each entry [i][j] is the FASTEST possible
-    // time from i to j under current traffic, considering route alternatives.
+    // Time-aware pairwise matrix: each [i][j] is the FASTEST possible time
+    // from i to j under current traffic, considering route alternatives.
     const data = await apiPost('/api/pairwise-matrix', {
       locations:    serverWaypoints,
       trafficLevel: state.trafficMult
-    });
+    }, signal);
+    if (_optimizeCanceled) return;
 
     const durations  = data.durations;
     const distances  = data.distances;
     const geometries = data.geometries;
 
-    setLoadingText(
-      state.algorithm === 'optimal'
-        ? 'Searching the shortest-time tour (Held-Karp DP)…'
-        : 'Searching a fast tour (heuristic)…'
-    );
+    // ── Stage 2: solve ───────────────────────────────────────────
+    cancelProgressAnimation();
+    const willBeExact = (state.algorithm === 'optimal' && n <= HELDKARP_MAX_N);
+    setProgressStage('solve', 90,
+      willBeExact
+        ? 'Running Held-Karp DP (exact shortest-time tour)…'
+        : 'Running multi-start NN + 2-opt heuristic…');
 
-    // Matrix is already traffic-adjusted → pass multiplier = 1
-    const tspResult = solveTSP(durations, 1.0, state.algorithm);
-    const { route: order, algorithm, mode, heuristicCost } = tspResult;
+    // Smoothly sweep 90→98 over the estimated compute time, with a floor so the
+    // phase is always visible (never a jarring instant snap). The solve runs in
+    // a Web Worker, so we wait for BOTH the result AND the minimum sweep time —
+    // whichever is longer — keeping the bar's motion smooth and unhurried.
+    const estComputeMs = estimateComputeMs(state.algorithm, n);
+    const sweepMs = Math.max(1200, Math.round(estComputeMs));
+    animateProgressTo(98, sweepMs);
 
-    const totalSec  = order.reduce(
+    const [tspResult] = await Promise.all([
+      solveTSP(durations, 1.0, state.algorithm),
+      new Promise(res => setTimeout(res, sweepMs))
+    ]);
+    if (_optimizeCanceled) return;
+    cancelProgressAnimation();
+    const { algorithm, mode, heuristicCost } = tspResult;
+    let order = tspResult.route;
+
+    // If a Big Center pin exists, rotate the loop so it STARTS (and ends) there.
+    // A TSP loop's total cost is rotation-invariant, so this changes only the
+    // starting point, not the optimality.
+    const centerWpIdx = serverWaypoints.findIndex(w => w.type === 'center');
+    const hasCenterStart = centerWpIdx >= 0 && order.includes(centerWpIdx);
+    if (hasCenterStart) {
+      const pos = order.indexOf(centerWpIdx);
+      if (pos > 0) order = [...order.slice(pos), ...order.slice(0, pos)];
+    }
+
+    const totalSec = order.reduce(
       (s, v, i) => s + durations[v][order[(i + 1) % order.length]], 0);
     const totalDist = order.reduce(
       (s, v, i) => s + (distances[v][order[(i + 1) % order.length]] || 0), 0);
 
-    // Stitch the chosen sub-routes (one per leg) into the full tour polyline
-    const tourLatLngs = stitchTourGeometry(geometries, order);
+    // ── Stage 3: draw ────────────────────────────────────────────
+    cancelProgressAnimation();
+    let tourLatLngs;
+    if (geometries && Object.keys(geometries).length > 0) {
+      // Quality path: stitch the per-leg geometries we already have
+      setProgressStage('draw', 92, 'Stitching per-leg geometry onto the map…');
+      tourLatLngs = stitchTourGeometry(geometries, order);
+    } else {
+      // Fast/table path: fetch the whole ordered tour geometry in one /route call
+      setProgressStage('draw', 92, 'Fetching tour geometry…');
+      const orderedLocs = [...order.map(i => serverWaypoints[i]), serverWaypoints[order[0]]];
+      try {
+        const routeData = await apiPost('/api/route', { locations: orderedLocs }, signal);
+        if (_optimizeCanceled) return;
+        if (routeData.code === 'Ok' && routeData.routes?.[0]) {
+          tourLatLngs = routeData.routes[0].geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+        }
+      } catch { /* fall through to straight-line fallback */ }
+      if (!tourLatLngs) {
+        // Last-ditch: straight segments between stops
+        tourLatLngs = [...order, order[0]].map(i => [serverWaypoints[i].lat, serverWaypoints[i].lng]);
+      }
+    }
     drawStitchedRoute(tourLatLngs, order);
 
     showResults(order, totalSec, totalDist, {
       algorithm, mode, heuristicCost,
-      trafficLabel: state.trafficLabel,
-      trafficMult:  state.trafficMult
+      trafficLabel:  state.trafficLabel,
+      trafficMult:   state.trafficMult,
+      trafficReason: state.trafficReason,
+      isLive:        state.autoTraffic,
+      durations,                       // for per-stop cumulative travel times
+      startIsCenter: hasCenterStart
     });
+
+    markAllStagesDone();
+    document.getElementById('progressDetail').textContent =
+      `Done! (~${(estMs / 1000).toFixed(1)}s estimated)`;
+    setTimeout(hideProgressUI, 450);
   } catch (err) {
+    if (_optimizeCanceled || err.name === 'AbortError') return;  // canceled — already handled
+    hideProgressUI();
     showToast('Optimization failed: ' + err.message);
   } finally {
-    hideLoading();
+    _optimizeAbort = null;
   }
 }
 
@@ -725,18 +1039,42 @@ function drawStitchedRoute(latlngs, order) {
   order.forEach((wpIdx, visitOrder) => {
     const wp     = serverWaypoints[wpIdx];
     const marker = state.markerMap[wp.id];
-    if (marker) marker.setIcon(makeIcon(visitOrder + 1, wp.ownerRole));
+    if (marker) marker.setIcon(makeIcon(visitOrder + 1, wp.ownerRole, wp.type));
   });
 }
 
 function showResults(order, totalSec, totalMeters, meta = {}) {
   const orderStr = order.map(i => i + 1).join(' → ') + ' → ' + (order[0] + 1);
-  const names = order.map(i => {
-    const wp = serverWaypoints[i];
-    const short = wp.name.split(',')[0];
-    const tag = wp.ownerRole === 'admin' ? ' 👑' : '';
-    return `<strong>${i + 1}</strong>. ${short}${tag}`;
-  }).join('<br>');
+
+  // Per-LEG travel time (under current traffic): each row shows how long it takes
+  // to drive FROM the previous stop TO this one. The first stop is the start.
+  const dur = meta.durations;
+  const stopRows = order.map((idx, k) => {
+    const legSec   = (k > 0 && dur) ? (dur[order[k - 1]][idx] || 0) : 0;
+    const wp       = serverWaypoints[idx];
+    const short    = wp.name.split(',')[0].replace(/^🏛️\s*/, '');
+    const isCenter = wp.type === 'center';
+    const icon     = isCenter ? '🏛️' : (wp.ownerRole === 'admin' ? '👑' : '');
+    const timeTxt  = (k === 0)
+      ? '<span class="stop-time start">start</span>'
+      : `<span class="stop-time">${fmtLeg(legSec)}</span>`;
+    return `
+      <div class="stop-row${isCenter ? ' center' : ''}">
+        <span class="stop-num${isCenter ? ' center' : ''}">${isCenter ? '★' : k + 1}</span>
+        <span class="stop-name">${icon ? icon + ' ' : ''}${short}</span>
+        ${timeTxt}
+      </div>`;
+  }).join('');
+  // Closing leg back to the start — its own travel time, not the cumulative total
+  const returnLegSec = dur ? (dur[order[order.length - 1]][order[0]] || 0) : 0;
+  const startWp   = serverWaypoints[order[0]];
+  const startName = startWp.name.split(',')[0].replace(/^🏛️\s*/, '');
+  const returnRow = `
+    <div class="stop-row return">
+      <span class="stop-num return">↩</span>
+      <span class="stop-name">back to ${meta.startIsCenter ? '🏛️ ' : ''}${startName}</span>
+      <span class="stop-time">${fmtLeg(returnLegSec)}</span>
+    </div>`;
 
   // Heuristic-vs-exact comparison (only meaningful in optimal mode)
   let comparison = '';
@@ -764,15 +1102,22 @@ function showResults(order, totalSec, totalMeters, meta = {}) {
 
   // Strip a trailing "Traffic" from the label so we don't get "Heavy Traffic traffic"
   const cleanLabel = (meta.trafficLabel || '').replace(/\s*traffic$/i, '').trim();
+  const livePrefix = meta.isLive ? '🛰️ live ' : '';
+  const reasonNote = meta.isLive && meta.trafficReason
+    ? `<div class="total-time-reason">${meta.trafficReason}</div>` : '';
   const trafficNote = meta.trafficMult && meta.trafficMult > 1
-    ? `with <strong>${cleanLabel || meta.trafficLabel}</strong> traffic`
-    : `at <strong>free flow</strong>`;
+    ? `with ${livePrefix}<strong>${cleanLabel || meta.trafficLabel}</strong> traffic`
+    : `at ${livePrefix}<strong>free flow</strong>`;
 
   document.getElementById('routeResults').innerHTML = `
-    <div class="total-time-card">
-      <div class="total-time-label">Total Travel Time</div>
+    <div class="total-time-card${meta.isLive ? ' live' : ''}">
+      <div class="total-time-label">
+        Total Travel Time
+        ${meta.isLive ? '<span class="live-pill">LIVE</span>' : ''}
+      </div>
       <div class="total-time-value">${fmtTime(totalSec)}</div>
       <div class="total-time-sub">${trafficNote}</div>
+      ${reasonNote}
     </div>
 
     <div class="result-row">
@@ -791,8 +1136,11 @@ function showResults(order, totalSec, totalMeters, meta = {}) {
       <div class="route-order">${orderStr}</div>
     </div>
     <div>
-      <div class="route-order-label">Stops</div>
-      <div style="font-size:12px;color:var(--text-muted);line-height:1.9">${names}</div>
+      <div class="route-order-label">
+        Stops &amp; travel time per leg
+        ${meta.startIsCenter ? '<span class="center-start-tag">starts at 🏛️ Big Center</span>' : ''}
+      </div>
+      <div class="stop-list">${stopRows}${returnRow}</div>
     </div>
     ${algoLine}
   `;
@@ -802,21 +1150,29 @@ function showResults(order, totalSec, totalMeters, meta = {}) {
 /* ════════════════════════════════════════════════════════════════
    HELPERS
 ════════════════════════════════════════════════════════════════ */
-async function reverseGeocode(lat, lng) {
+async function reverseGeocodeWithCountry(lat, lng) {
   try {
     const res  = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=14`,
       { headers: { 'Accept-Language': 'en' } }
     );
     const data = await res.json();
     const parts = data.display_name?.split(',') || [];
-    return parts.slice(0, 2).map(s => s.trim()).join(', ') || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    const name  = parts.slice(0, 2).map(s => s.trim()).join(', ')
+                  || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    const countryCode = (data.address?.country_code || '').toLowerCase();
+    const country     = data.address?.country || '';
+    return { name, country, countryCode };
   } catch {
-    return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    return { name: `${lat.toFixed(4)}, ${lng.toFixed(4)}`, country: '', countryCode: '' };
   }
 }
+// Back-compat shim
+async function reverseGeocode(lat, lng) {
+  return (await reverseGeocodeWithCountry(lat, lng)).name;
+}
 
-async function apiCall(method, endpoint, body) {
+async function apiCall(method, endpoint, body, signal) {
   const opts = {
     method,
     headers: { 'Authorization': `Bearer ${state.token}` }
@@ -825,6 +1181,7 @@ async function apiCall(method, endpoint, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
+  if (signal) opts.signal = signal;
   const res = await fetch(endpoint, opts);
   if (res.status === 401) {
     localStorage.removeItem('token');
@@ -839,17 +1196,350 @@ async function apiCall(method, endpoint, body) {
   return data;
 }
 // Back-compat alias
-const apiPost = (e, b) => apiCall('POST', e, b);
+const apiPost = (e, b, signal) => apiCall('POST', e, b, signal);
 
-function showLoading(text) {
-  document.getElementById('loadingText').textContent = text;
+/* ════════════════════════════════════════════════════════════════
+   PROGRESS UI  —  staged progress bar in the loading overlay
+════════════════════════════════════════════════════════════════ */
+const STAGES = ['fetch', 'solve', 'draw'];
+let _progressAnim = null;
+
+// Per-stage timing
+let _stageStart  = {};     // stage → performance.now() when it became active
+let _stageDone   = {};     // stage → frozen elapsed ms once finished
+let _activeStage = null;
+let _stageTicker = null;
+
+function fmtStageTime(ms) {
+  if (ms == null) return '';
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+function startStageTicker() {
+  stopStageTicker();
+  _stageTicker = setInterval(() => {
+    if (!_activeStage || _stageStart[_activeStage] == null) return;
+    const el = document.getElementById('time-' + _activeStage);
+    if (el) el.textContent = fmtStageTime(performance.now() - _stageStart[_activeStage]);
+  }, 100);
+}
+function stopStageTicker() {
+  if (_stageTicker) { clearInterval(_stageTicker); _stageTicker = null; }
+}
+
+function showProgressUI(title) {
+  document.getElementById('loadingTitle').textContent = title || 'Optimizing route…';
+  STAGES.forEach(s => {
+    const el = document.getElementById('stage-' + s);
+    el.classList.remove('active', 'done');
+    el.querySelector('.stage-status').textContent = '';
+    const tEl = document.getElementById('time-' + s);
+    if (tEl) tEl.textContent = '';
+  });
+  // Reset timers
+  _stageStart = {}; _stageDone = {}; _activeStage = null;
+  stopStageTicker();
+
+  document.getElementById('progressBarFill').style.width = '0%';
+  document.getElementById('progressPercent').textContent = '0%';
+  document.getElementById('progressDetail').textContent = 'Starting…';
   document.getElementById('loadingOverlay').classList.remove('hidden');
   document.getElementById('optimizeBtn').disabled = true;
 }
-function setLoadingText(text) { document.getElementById('loadingText').textContent = text; }
-function hideLoading() {
+
+function setProgressStage(stage, percent, detail) {
+  const ix  = STAGES.indexOf(stage);
+  const now = performance.now();
+  STAGES.forEach((s, i) => {
+    const el  = document.getElementById('stage-' + s);
+    const tEl = document.getElementById('time-' + s);
+    if (i < ix) {
+      el.classList.add('done');    el.classList.remove('active');
+      el.querySelector('.stage-status').textContent = '✓';
+      // Freeze this finished stage's elapsed time
+      if (_stageStart[s] != null && _stageDone[s] == null) _stageDone[s] = now - _stageStart[s];
+      if (tEl && _stageDone[s] != null) tEl.textContent = fmtStageTime(_stageDone[s]);
+    } else if (i === ix) {
+      el.classList.add('active');  el.classList.remove('done');
+      el.querySelector('.stage-status').textContent = '⏳';
+      if (_stageStart[s] == null) _stageStart[s] = now;   // start this stage's clock
+    } else {
+      el.classList.remove('active', 'done');
+      el.querySelector('.stage-status').textContent = '';
+      if (tEl) tEl.textContent = '';
+    }
+  });
+  _activeStage = stage;
+  startStageTicker();
+
+  if (percent != null) {
+    const fill = document.getElementById('progressBarFill');
+    // A discrete jump — animate it smoothly with a short CSS transition
+    fill.style.transition = 'width .3s ease';
+    fill.style.width = percent + '%';
+    document.getElementById('progressPercent').textContent = Math.round(percent) + '%';
+  }
+  if (detail) document.getElementById('progressDetail').textContent = detail;
+}
+
+function markAllStagesDone() {
+  const now = performance.now();
+  // Freeze whatever stage was still running
+  if (_activeStage && _stageStart[_activeStage] != null && _stageDone[_activeStage] == null) {
+    _stageDone[_activeStage] = now - _stageStart[_activeStage];
+  }
+  STAGES.forEach(s => {
+    const el = document.getElementById('stage-' + s);
+    el.classList.add('done'); el.classList.remove('active');
+    el.querySelector('.stage-status').textContent = '✓';
+    const tEl = document.getElementById('time-' + s);
+    if (tEl && _stageDone[s] != null) tEl.textContent = fmtStageTime(_stageDone[s]);
+  });
+  stopStageTicker();
+  _activeStage = null;
+  document.getElementById('progressBarFill').style.width = '100%';
+  document.getElementById('progressPercent').textContent = '100%';
+}
+
+function animateProgressTo(targetPercent, durationMs) {
+  cancelProgressAnimation();
+  const fill = document.getElementById('progressBarFill');
+  const pctEl = document.getElementById('progressPercent');
+  fill.style.transition = 'none';   // rAF drives smoothness
+  const start = parseFloat(fill.style.width) || 0;
+  const t0 = performance.now();
+  const id = { canceled: false };
+  _progressAnim = id;
+  function tick(now) {
+    if (id.canceled) return;
+    const t = Math.min(1, (now - t0) / durationMs);
+    const cur = start + (targetPercent - start) * t;
+    fill.style.width = cur + '%';
+    pctEl.textContent = Math.round(cur) + '%';
+    if (t < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  return id;
+}
+
+// Asymptotic creep — approaches `ceiling` but never reaches it, fast then slow.
+// Keeps the bar visibly alive while we wait for an unpredictable-length fetch.
+function animateProgressAsymptotic(ceiling, tauMs, detailPrefix) {
+  cancelProgressAnimation();
+  const fill  = document.getElementById('progressBarFill');
+  const pctEl = document.getElementById('progressPercent');
+  const detEl = document.getElementById('progressDetail');
+  fill.style.transition = 'none';   // rAF drives smoothness; CSS transition would stutter
+  const start = parseFloat(fill.style.width) || 0;
+  const t0 = performance.now();
+  const id = { canceled: false };
+  _progressAnim = id;
+  function tick(now) {
+    if (id.canceled) return;
+    const elapsed = now - t0;
+    const cur = start + (ceiling - start) * (1 - Math.exp(-elapsed / tauMs));
+    fill.style.width = cur + '%';
+    pctEl.textContent = Math.round(cur) + '%';
+    if (detailPrefix && elapsed > 1500) {
+      detEl.textContent = `${detailPrefix} (${Math.round(elapsed / 1000)}s)`;
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  return id;
+}
+
+function cancelProgressAnimation() {
+  if (_progressAnim) { _progressAnim.canceled = true; _progressAnim = null; }
+}
+
+function hideProgressUI() {
+  cancelProgressAnimation();
+  stopStageTicker();
   document.getElementById('loadingOverlay').classList.add('hidden');
   document.getElementById('optimizeBtn').disabled = false;
+}
+
+// Back-compat shims for any leftover callers
+function showLoading(t) { showProgressUI(t); }
+function setLoadingText(t) { document.getElementById('progressDetail').textContent = t; }
+function hideLoading() { hideProgressUI(); }
+
+/* ════════════════════════════════════════════════════════════════
+   ALGORITHM TIME ESTIMATOR  —  refreshes as waypoints change
+════════════════════════════════════════════════════════════════ */
+// Practical Held-Karp ceiling (matches MAX_HELDKARP_N in tsp-worker.js).
+// In a Web Worker we comfortably reach n=22 (~550 MB peak Float32+Int16).
+// Above this the worker transparently runs the heuristic instead.
+const HELDKARP_MAX_N = 22;
+
+// Above this, the server switches to a single fast /table call (must match server)
+const PAIRWISE_MAX_N = 12;
+
+// Network fetch — SHARED by both algorithms (this is what dominates total time)
+function estimateFetchMs(n) {
+  if (n < 2) return 0;
+  if (n <= PAIRWISE_MAX_N) {
+    // Per-pair /route?alternatives — OSRM demo throttles, so ~700 ms effective
+    // per call through ~6 usable parallel slots.
+    const pairs = n * (n - 1) / 2;
+    return Math.ceil(pairs / 6) * 700;
+  }
+  // Fast bulk path: one /table call + one /route call for the tour geometry.
+  // Roughly constant regardless of n (a little more for very large matrices).
+  return 2500 + n * 60;
+}
+
+// Pure algorithm compute — this is what DIFFERS between the two.
+// Throughput constants are calibrated against measured worker performance:
+//   Held-Karp inner loop runs ~500k (n²·2ⁿ)-proxy-ops/ms; we use 350k to stay
+//   slightly conservative (estimate ≥ actual, since per-op speed drops as the
+//   DP table grows past CPU cache near n=22).  Measured: n20≈0.8s, n21≈1.7s.
+let   HELDKARP_OPS_PER_MS  = 350_000;   // auto-recalibrated every 60s (see below)
+const HEURISTIC_OPS_PER_MS = 30_000;
+function estimateComputeMs(algo, n) {
+  if (n < 2) return 0;
+  const useExact = (algo === 'optimal' && n <= HELDKARP_MAX_N);
+  return useExact
+    ? (n * n * Math.pow(2, n)) / HELDKARP_OPS_PER_MS   // Held-Karp: n²·2ⁿ ops
+    : (10 * n * n * n)         / HEURISTIC_OPS_PER_MS;  // NN·n starts + 2-opt: ~10·n³ ops
+}
+
+// Total (fetch + compute) — used for the long-run confirmation dialog
+function estimateAlgoTimeMs(algo, n) {
+  if (n < 2) return null;
+  return estimateFetchMs(n) + estimateComputeMs(algo, n);
+}
+
+// ── Auto-calibration of the Held-Karp speed constant ──────────────────────────
+// Re-benchmarks the actual machine every 60s so the estimate tracks reality
+// (thermal throttling, other tabs, battery-saver, etc. all shift throughput).
+// Runs a tiny n=17 DP (~13 MB, ~60 ms) during idle time so it never janks.
+function calibrateHeldKarpSpeed() {
+  const nb = 17;
+  const m = Array.from({ length: nb }, (_, i) =>
+    Array.from({ length: nb }, (_, j) => (i === j ? 0 : 100 + ((i * 73 + j * 97) % 211))));
+  const FULL = (1 << nb) - 1, SIZE = (1 << nb) * nb;
+  const dp = new Float32Array(SIZE);
+  dp.fill(Infinity);
+  dp[nb] = 0;                               // dp[(1<<0)*nb + 0]
+  const t0 = performance.now();
+  for (let mask = 1; mask <= FULL; mask++) {
+    if (!(mask & 1)) continue;
+    for (let i = 0; i < nb; i++) {
+      if (!(mask & (1 << i))) continue;
+      const cur = dp[mask * nb + i];
+      if (cur === Infinity) continue;
+      for (let j = 1; j < nb; j++) {
+        if (mask & (1 << j)) continue;
+        const idx = (mask | (1 << j)) * nb + j;
+        const cand = cur + m[i][j];
+        if (cand < dp[idx]) dp[idx] = cand;
+      }
+    }
+  }
+  const ms = performance.now() - t0;
+  if (ms <= 0) return;
+  const measured   = (nb * nb * Math.pow(2, nb)) / ms;   // proxy-ops per ms
+  // Stay ~30% conservative (estimate ≥ actual); clamp to a sane band.
+  HELDKARP_OPS_PER_MS = Math.round(Math.max(100_000, Math.min(2_000_000, measured * 0.7)));
+}
+
+function scheduleCalibration() {
+  const run = () => {
+    if ('requestIdleCallback' in window) requestIdleCallback(calibrateHeldKarpSpeed);
+    else calibrateHeldKarpSpeed();
+    updateAlgoEstimates();   // refresh the chips with the new figure
+  };
+  run();                       // calibrate once on load
+  setInterval(run, 60_000);    // …and every minute thereafter
+}
+
+function fmtEstimate(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000)        return `~${(ms / 1000).toFixed(1)}s`;
+  if (ms < 60_000)      return `~${Math.round(ms / 1000)}s`;
+  if (ms < 3_600_000) { // < 1 hour
+    const m = Math.round(ms / 60_000);
+    return `~${m}m`;
+  }
+  // >= 1 hour
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.round((ms % 3_600_000) / 60_000);
+  return m > 0 ? `~${h}h ${m}m` : `~${h}h`;
+}
+
+// Compute is often sub-second — show it with finer granularity than fmtEstimate
+function fmtCompute(ms) {
+  if (ms == null) return '—';
+  if (ms < 10)    return '<0.01s';
+  if (ms < 1000)  return `${Math.round(ms)} ms`;
+  return fmtEstimate(ms).replace('~', '');
+}
+
+function updateAlgoEstimates() {
+  const n = serverWaypoints.length;
+  const blocked = n > HELDKARP_MAX_N;   // Held-Karp not allowed past the cap
+
+  // Past the cap, force-select the heuristic and disable the Optimal button.
+  const optimalBtn = document.querySelector('.algo-btn[data-algo="optimal"]');
+  const heurBtn    = document.querySelector('.algo-btn[data-algo="heuristic"]');
+  if (optimalBtn && heurBtn) {
+    optimalBtn.classList.toggle('disabled', blocked);
+    optimalBtn.setAttribute('aria-disabled', blocked ? 'true' : 'false');
+    if (blocked && state.algorithm === 'optimal') {
+      state.algorithm = 'heuristic';
+      optimalBtn.classList.remove('active');
+      heurBtn.classList.add('active');
+    }
+  }
+
+  // Chips show COMPUTE time — the part that actually differs between algorithms
+  document.querySelectorAll('.algo-est').forEach(el => {
+    if (n < 2) { el.textContent = '—'; return; }
+    if (el.dataset.algo === 'optimal' && blocked) { el.textContent = 'off'; return; }
+    el.textContent = fmtCompute(estimateComputeMs(el.dataset.algo, n));
+  });
+
+  // Method label under "Optimal"
+  const methodEl = document.getElementById('optimalMethod');
+  if (methodEl) {
+    methodEl.textContent = blocked ? 'disabled' : 'Held-Karp';
+    methodEl.classList.toggle('method-fallback', blocked);
+  }
+
+  // Fetch time is shared — show it once, separately
+  const fetchEl = document.getElementById('fetchEst');
+  if (fetchEl) {
+    if (n < 2) {
+      fetchEl.textContent = '';
+    } else if (n > PAIRWISE_MAX_N) {
+      fetchEl.textContent =
+        `⏱ + ${fmtEstimate(estimateFetchMs(n))} to fetch road data (fast bulk mode for ${n} stops)`;
+    } else {
+      fetchEl.textContent =
+        `⏱ + ${fmtEstimate(estimateFetchMs(n))} to fetch road data from OSRM (shared by both)`;
+    }
+  }
+
+  updateAlgoDesc();
+}
+
+function updateAlgoDesc() {
+  const el = document.getElementById('algoDesc');
+  if (!el) return;
+  const n = serverWaypoints.length;
+
+  if (n > HELDKARP_MAX_N) {
+    el.innerHTML = `Over ${HELDKARP_MAX_N} stops: Held-Karp needs &gt;1&nbsp;GB RAM, so it's disabled. Using the heuristic (within a few % of optimum).`;
+    el.classList.add('warn');
+  } else if (state.algorithm === 'optimal') {
+    el.textContent = 'Finds the shortest possible loop — slower for many stops.';
+    el.classList.remove('warn');
+  } else {
+    el.textContent = 'Fast greedy search — usually within a few percent of the best loop.';
+    el.classList.remove('warn');
+  }
 }
 
 /* Toast notifications */
@@ -873,6 +1563,15 @@ function fmtTime(seconds) {
   const m = Math.floor((s % 3600) / 60);
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+// Per-leg formatter: rounds to the nearest minute (so legs sum close to the
+// total) and shows seconds for sub-minute legs (city hops can be < 1 min).
+function fmtLeg(seconds) {
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 function fmtDist(meters) {
   if (!meters) return '—';

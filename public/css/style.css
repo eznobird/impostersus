@@ -217,6 +217,42 @@ a { color: var(--primary); }
 }
 .traffic-desc { font-size: 12px; color: var(--text-muted); font-style: italic; }
 
+/* Auto (live traffic) button */
+.traffic-btn.auto-btn {
+  width: 100%;
+  background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%);
+  border-color: #a78bfa;
+  color: #6d28d9;
+  font-weight: 600;
+  margin-bottom: 6px;
+  justify-content: center;
+}
+.traffic-btn.auto-btn:hover {
+  background: linear-gradient(135deg, #ddd6fe 0%, #c4b5fd 100%);
+  border-color: #8b5cf6;
+}
+.traffic-btn.auto-btn.active {
+  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+  color: #fff;
+  border-color: #6d28d9;
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, .25);
+}
+.auto-pulse {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 0 rgba(255,255,255,.7);
+  animation: live-pulse 1.5s ease-out infinite;
+}
+.traffic-btn.auto-btn:not(.active) .auto-pulse {
+  background: #8b5cf6;
+  box-shadow: 0 0 0 0 rgba(139, 92, 246, .5);
+}
+@keyframes live-pulse {
+  0%   { box-shadow: 0 0 0 0   rgba(255,255,255,.7); }
+  70%  { box-shadow: 0 0 0 6px rgba(255,255,255,0); }
+  100% { box-shadow: 0 0 0 0   rgba(255,255,255,0); }
+}
+
 /* Algorithm picker */
 .algo-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
@@ -234,12 +270,31 @@ a { color: var(--primary); }
 .algo-btn.active {
   border-color: var(--primary); background: var(--primary-light); color: var(--primary);
 }
+/* Held-Karp blocked past the cap — greyed, not selectable */
+.algo-btn.disabled {
+  opacity: .45;
+  background: var(--bg);
+  border-color: var(--border);
+  border-style: dashed;
+  cursor: not-allowed;
+  filter: grayscale(.6);
+}
+.algo-btn.disabled:hover { border-color: var(--border); background: var(--bg); }
 .algo-icon { font-size: 16px; line-height: 1; flex-shrink: 0; }
 .algo-text { flex: 1; min-width: 0; line-height: 1.2; }
 .algo-name { font-size: 12px; font-weight: 600; }
 .algo-sub  { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
 .algo-btn.active .algo-sub { color: var(--primary); opacity: .75; }
+#optimalMethod.method-fallback { color: #b45309; font-weight: 700; }
+.algo-btn.active #optimalMethod.method-fallback { color: #fde68a; }
 .algo-desc { font-size: 12px; color: var(--text-muted); font-style: italic; }
+.fetch-est {
+  font-size: 11px; color: var(--primary-dark);
+  background: var(--primary-light);
+  border-radius: var(--radius);
+  padding: 5px 8px; margin-top: 2px;
+}
+.fetch-est:empty { display: none; }
 
 /* Optimize button area */
 .optimize-hint { font-size: 11px; color: var(--text-muted); text-align: center; }
@@ -261,6 +316,37 @@ a { color: var(--primary); }
   font-weight: 500; word-break: break-all;
 }
 .route-order-label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
+.center-start-tag {
+  display: inline-block; margin-left: 6px; text-transform: none; letter-spacing: 0;
+  background: linear-gradient(135deg, #b91c1c, #7f1d1d); color: #fff;
+  font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 8px;
+}
+
+/* Per-stop arrival-time list */
+.stop-list { display: flex; flex-direction: column; gap: 3px; }
+.stop-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 12px;
+}
+.stop-row.center { background: #fef2f2; border-color: #fca5a5; }
+.stop-row.return { background: var(--primary-light); border-color: #bfdbfe; }
+.stop-num {
+  width: 20px; height: 20px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--primary); color: #fff;
+  font-size: 11px; font-weight: 700; border-radius: 50%;
+}
+.stop-num.center { background: radial-gradient(circle at 30% 30%, #fef3c7, #ea580c 70%, #b91c1c); }
+.stop-num.return { background: transparent; color: var(--primary-dark); font-size: 14px; }
+.stop-name { flex: 1; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stop-time {
+  font-variant-numeric: tabular-nums; font-weight: 600;
+  color: var(--text-muted); font-size: 11px; flex-shrink: 0;
+}
+.stop-time.start { color: #16a34a; font-style: italic; }
+.stop-time.total { color: var(--primary-dark); font-weight: 700; }
 
 .traffic-impact {
   background: #fff7ed; border: 1px solid #fed7aa; border-radius: var(--radius);
@@ -287,6 +373,33 @@ a { color: var(--primary); }
   font-size: 12px; color: var(--primary); margin-top: 4px;
 }
 .total-time-sub strong { font-weight: 600; }
+.total-time-reason {
+  font-size: 11px; color: var(--primary); opacity: .8;
+  margin-top: 2px; font-style: italic;
+}
+
+/* Live variant — purple tint */
+.total-time-card.live {
+  background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%);
+  border-color: #a78bfa;
+}
+.total-time-card.live .total-time-label,
+.total-time-card.live .total-time-value,
+.total-time-card.live .total-time-sub,
+.total-time-card.live .total-time-reason {
+  color: #5b21b6;
+}
+.live-pill {
+  display: inline-block;
+  background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+  color: #fff;
+  font-size: 9px; font-weight: 700; letter-spacing: .6px;
+  padding: 2px 7px; border-radius: 8px;
+  margin-left: 6px; vertical-align: middle;
+  position: relative; top: -1px;
+  box-shadow: 0 0 0 0 rgba(139, 92, 246, .6);
+  animation: live-pulse 1.5s ease-out infinite;
+}
 
 .leg-note {
   font-size: 11px; color: var(--text-muted);
@@ -358,6 +471,113 @@ a { color: var(--primary); }
 }
 .loading-card p { font-size: 14px; color: var(--text-muted); }
 
+/* Progress card (replaces the simple spinner) */
+.progress-card {
+  width: 360px; max-width: 90vw;
+  align-items: stretch;
+  padding: 22px 24px;
+  text-align: left;
+  gap: 16px;
+}
+.progress-card h3 {
+  font-size: 15px; font-weight: 700; color: var(--text);
+  text-align: center;
+}
+
+.progress-stages {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.stage {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--text-muted);
+  transition: all .2s;
+}
+.stage .stage-icon { font-size: 16px; }
+.stage .stage-text { flex: 1; }
+.stage .stage-time {
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; min-width: 40px; text-align: right;
+  margin-right: 4px;
+}
+.stage.active .stage-time { color: var(--primary); }
+.stage.done   .stage-time { color: #16a34a; }
+.stage .stage-status {
+  font-size: 14px; font-weight: 700; width: 18px; text-align: right;
+}
+.stage.active {
+  background: var(--primary-light);
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  font-weight: 600;
+}
+.stage.active .stage-status { color: var(--primary); }
+.stage.done {
+  background: #f0fdf4;
+  border-color: #86efac;
+  color: #15803d;
+}
+.stage.done .stage-status { color: #16a34a; }
+
+.progress-bar-track {
+  width: 100%; height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary) 0%, var(--primary-dark) 100%);
+  width: 0%;
+  border-radius: 4px;
+  /* No CSS transition here — it fights with requestAnimationFrame and causes
+     stutter. JS adds a short transition only for discrete stage jumps. */
+}
+.progress-meta {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px;
+}
+.progress-meta #progressDetail { color: var(--text-muted); font-style: italic; }
+.progress-meta #progressPercent {
+  color: var(--primary-dark); font-weight: 700; font-size: 13px;
+}
+#cancelOptimizeBtn { margin-top: 6px; }
+
+/* Algo time-estimate chip */
+.algo-est {
+  display: inline-block;
+  padding: 1px 7px;
+  background: #dbeafe;            /* light blue */
+  color: var(--primary-dark);     /* dark blue text */
+  border: 1px solid #93c5fd;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: .2px;
+  margin-left: 4px;
+  white-space: nowrap;
+}
+.algo-btn.active .algo-est {
+  background: var(--primary);     /* solid primary blue */
+  color: #fff;
+  border-color: var(--primary-dark);
+}
+
+/* Description text — warning variant when n exceeds Held-Karp's range */
+.algo-desc.warn {
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius);
+  padding: 6px 9px;
+  font-style: normal;
+  font-weight: 500;
+}
+
 /* ─── Spinners ───────────────────────────────────────────────── */
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes slideDown { from { opacity:0; transform: translateX(-50%) translateY(-8px); } }
@@ -382,6 +602,38 @@ a { color: var(--primary); }
   transition: transform .1s;
 }
 .map-marker:hover { transform: scale(1.15); }
+
+/* ★★★ BIG CENTER marker ★★★ — admin-only, max one, unique visual ★★★ */
+@keyframes center-pulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 3px rgba(220, 38, 38, .45),
+                0 4px 14px rgba(0,0,0,.4);
+  }
+  50% {
+    transform: scale(1.06);
+    box-shadow: 0 0 0 12px rgba(220, 38, 38, .12),
+                0 6px 22px rgba(220, 38, 38, .6);
+  }
+}
+.map-marker.center-pin {
+  width: 56px; height: 56px;
+  background:
+    radial-gradient(circle at 30% 30%, #fef3c7 0%, #fbbf24 25%, #ea580c 60%, #b91c1c 100%);
+  border: 3px solid #7f1d1d;
+  color: #fff;
+  font-size: 11px; font-weight: 800;
+  flex-direction: column;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0,0,0,.5);
+  animation: center-pulse 2s ease-in-out infinite;
+}
+.map-marker.center-pin .pin-crown-big {
+  font-size: 22px; line-height: 1; margin-top: -3px;
+  filter: drop-shadow(0 1px 1px rgba(0,0,0,.4));
+}
+.map-marker.center-pin .pin-num { font-size: 10px; margin-top: 1px; }
+.map-marker.center-pin:hover { transform: scale(1.12); }
 
 /* SPECIAL admin marker */
 @keyframes admin-pulse {
@@ -430,10 +682,57 @@ a { color: var(--primary); }
   background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
   border-color: #fbbf24;
 }
+.waypoint-item.center-owned {
+  background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+  border-color: #ef4444;
+  border-width: 1.5px;
+}
 .wp-number.admin-num {
   background: linear-gradient(135deg, #fbbf24, #d97706);
   color: #78350f;
   box-shadow: 0 0 0 2px rgba(245,158,11,.25);
+}
+.wp-number.center-num {
+  background: radial-gradient(circle at 30% 30%, #fef3c7, #ea580c 70%, #b91c1c);
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 0 0 3px rgba(220,38,38,.25);
+}
+.big-center-tag {
+  background: linear-gradient(135deg, #b91c1c, #7f1d1d);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+/* Big Center box in admin panel */
+.big-center-box {
+  background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+  border: 1.5px solid #fca5a5;
+  border-radius: var(--radius);
+  padding: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+  margin-bottom: 4px;
+}
+.big-center-label {
+  font-size: 12px; font-weight: 700; color: #7f1d1d;
+  display: flex; align-items: center; justify-content: space-between;
+  letter-spacing: .3px;
+}
+.big-center-state {
+  font-size: 10px; font-weight: 600; color: var(--text-muted);
+  background: var(--surface);
+  padding: 1px 7px; border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.big-center-state.active {
+  background: #b91c1c; color: #fff; border-color: #7f1d1d;
+}
+.add-banner.center-banner {
+  background: linear-gradient(135deg, #b91c1c, #7f1d1d);
 }
 .wp-meta { margin-top: 2px; }
 .wp-owner {
