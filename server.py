@@ -23,6 +23,10 @@ JWT_SECRET = os.environ.get('JWT_SECRET', 'tsp-dev-secret-change-in-production')
 PORT       = int(os.environ.get('PORT', 3000))
 OSRM_BASE  = 'http://router.project-osrm.org'
 
+# At or below this many stops we do detailed per-pair routing (alternatives).
+# Above it we switch to a single fast /table call to avoid hammering OSRM.
+PAIRWISE_MAX_N = 12
+
 # Users — admin is always present; guest accounts start at 0 and are
 # created at runtime by the admin. Guests persist in users.json so they
 # survive server restarts.
@@ -230,8 +234,11 @@ def delete_user(username):
 def matrix():
     data      = request.get_json() or {}
     locations = data.get('locations', [])
-    if not (2 <= len(locations) <= 15):
-        return jsonify({'error': 'Provide between 2 and 15 locations'}), 400
+    n = len(locations)
+    if n < 2:
+        return jsonify({'error': 'Provide at least 2 locations'}), 400
+    if n > 100:
+        return jsonify({'error': f'{n} is too many — please use ≤ 100.'}), 400
 
     coords = ';'.join(f"{l['lng']},{l['lat']}" for l in locations)
     try:
@@ -327,18 +334,56 @@ def pairwise_matrix():
         traffic_level = 1.0
 
     n = len(locations)
-    if not (2 <= n <= 15):
-        return jsonify({'error': 'Provide between 2 and 15 locations'}), 400
+    if n < 2:
+        return jsonify({'error': 'Provide at least 2 locations'}), 400
+    if n > 100:
+        return jsonify({
+            'error': f'{n} is too many — OSRM demo server can\'t handle that many in one batch. Please use ≤ 100.'
+        }), 400
 
     INF = 1e15
+
+    # ── FAST BULK PATH (n > PAIRWISE_MAX_N) ────────────────────────────────────
+    # For many stops, n²/2 separate /route calls hammer the OSRM demo server and
+    # take minutes. Instead, fetch the entire duration/distance matrix in ONE
+    # /table call. We lose per-pair alternative-route selection, but a uniform
+    # traffic multiplier is applied and the tour geometry is fetched afterward.
+    if n > PAIRWISE_MAX_N:
+        coords = ';'.join(f"{l['lng']},{l['lat']}" for l in locations)
+        try:
+            tbl = osrm_get(f'/table/v1/driving/{coords}?annotations=duration,distance')
+        except RuntimeError as e:
+            return jsonify({'error': str(e)}), 503
+        if tbl.get('code') != 'Ok':
+            return jsonify({'error': 'Routing table unavailable'}), 503
+
+        raw_dur  = tbl.get('durations') or []
+        raw_dist = tbl.get('distances') or []
+        durations = [[0.0 if i == j else INF for j in range(n)] for i in range(n)]
+        distances = [[0.0 if i == j else INF for j in range(n)] for i in range(n)]
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                d  = raw_dur[i][j]  if i < len(raw_dur)  and j < len(raw_dur[i])  else None
+                ds = raw_dist[i][j] if i < len(raw_dist) and j < len(raw_dist[i]) else None
+                durations[i][j] = (d * traffic_level) if d is not None else INF
+                distances[i][j] = ds if ds is not None else INF
+        return jsonify({
+            'durations':    durations,
+            'distances':    distances,
+            'geometries':   {},        # client fetches the final tour geometry once
+            'trafficLevel': traffic_level,
+            'n':            n,
+            'mode':         'table'
+        })
+
+    # ── QUALITY PATH (small n) ─────────────────────────────────────────────────
+    # Per-pair /route?alternatives so each leg uses its time-optimal path.
     durations  = [[0.0 if i == j else INF for j in range(n)] for i in range(n)]
     distances  = [[0.0 if i == j else INF for j in range(n)] for i in range(n)]
     geometries = {}
-
     pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
-
-    # Fan-out the OSRM calls so we don't sit at ~200ms × n²/2 in serial.
-    # OSRM demo server tolerates ~8 parallel connections comfortably.
     with ThreadPoolExecutor(max_workers=8) as pool:
         for i, j, best in pool.map(
             lambda p: _route_pair(p[0], p[1], locations, traffic_level), pairs
@@ -356,7 +401,8 @@ def pairwise_matrix():
         'distances':    distances,
         'geometries':   geometries,
         'trafficLevel': traffic_level,
-        'n':            n
+        'n':            n,
+        'mode':         'pairwise'
     })
 
 
@@ -402,6 +448,10 @@ def on_disconnect():
     emit('presence', {'count': len(connected_users)}, broadcast=True)
 
 
+def _in_thailand_bbox(lat, lng):
+    return 5.5 <= lat <= 20.5 and 97.3 <= lng <= 105.7
+
+
 @socketio.on('add_waypoint')
 def on_add_waypoint(data):
     user = connected_users.get(request.sid)
@@ -409,15 +459,36 @@ def on_add_waypoint(data):
         return
 
     try:
+        lat     = float(data['lat'])
+        lng     = float(data['lng'])
+        wp_type = data.get('type', 'normal')   # 'normal' | 'center'
+        if wp_type not in ('normal', 'center'):
+            wp_type = 'normal'
         wp = {
             'id':        str(data['id']),
-            'lat':       float(data['lat']),
-            'lng':       float(data['lng']),
+            'lat':       lat,
+            'lng':       lng,
             'name':      str(data.get('name', '')),
             'owner':     user['username'],
-            'ownerRole': user['role']
+            'ownerRole': user['role'],
+            'type':      wp_type
         }
     except (KeyError, ValueError, TypeError):
+        return
+
+    # Big Center: only one allowed, only admin can set
+    if wp_type == 'center':
+        if user['role'] != 'admin':
+            emit('action_denied', {'reason': 'Only the admin can set the Big Center.'})
+            return
+        # Replace any existing center
+        for old_id in [wid for wid, w in waypoints_db.items() if w.get('type') == 'center']:
+            del waypoints_db[old_id]
+            emit('waypoint_removed', {'id': old_id}, broadcast=True)
+
+    # Defence-in-depth: bbox enforcement
+    if not _in_thailand_bbox(lat, lng):
+        emit('action_denied', {'reason': 'Pins must be inside Thailand'})
         return
 
     waypoints_db[wp['id']] = wp
@@ -454,11 +525,17 @@ def on_move_waypoint(data):
         return
 
     try:
-        wp['lat'] = float(data['lat'])
-        wp['lng'] = float(data['lng'])
+        new_lat = float(data['lat'])
+        new_lng = float(data['lng'])
     except (KeyError, ValueError, TypeError):
         return
 
+    if not _in_thailand_bbox(new_lat, new_lng):
+        emit('action_denied', {'reason': 'Pins must be inside Thailand'})
+        return
+
+    wp['lat'] = new_lat
+    wp['lng'] = new_lng
     emit('waypoint_moved',
          {'id': wp_id, 'lat': wp['lat'], 'lng': wp['lng']},
          broadcast=True)

@@ -52,21 +52,25 @@
       <!-- Traffic section -->
       <div class="sidebar-section">
         <h3>Traffic Conditions</h3>
+        <button class="traffic-btn auto-btn active" data-mult="auto" type="button">
+          <span class="auto-pulse"></span>
+          🛰️ Auto (Live Traffic)
+        </button>
         <div class="traffic-grid">
-          <button class="traffic-btn active" data-mult="1.0">
+          <button class="traffic-btn" data-mult="1.0" type="button">
             <span class="traffic-dot" style="background:#16a34a"></span> Free Flow
           </button>
-          <button class="traffic-btn" data-mult="1.3">
+          <button class="traffic-btn" data-mult="1.3" type="button">
             <span class="traffic-dot" style="background:#ca8a04"></span> Light
           </button>
-          <button class="traffic-btn" data-mult="1.7">
+          <button class="traffic-btn" data-mult="1.7" type="button">
             <span class="traffic-dot" style="background:#d97706"></span> Moderate
           </button>
-          <button class="traffic-btn" data-mult="2.5">
+          <button class="traffic-btn" data-mult="2.5" type="button">
             <span class="traffic-dot" style="background:#dc2626"></span> Heavy
           </button>
         </div>
-        <p id="trafficDesc" class="traffic-desc">No delays expected — optimal travel times</p>
+        <p id="trafficDesc" class="traffic-desc">Detecting live traffic…</p>
       </div>
 
       <!-- Algorithm picker -->
@@ -77,18 +81,19 @@
             <span class="algo-icon">⚙️</span>
             <div class="algo-text">
               <div class="algo-name">Optimal</div>
-              <div class="algo-sub">Held-Karp DP</div>
+              <div class="algo-sub"><span id="optimalMethod">Held-Karp</span> · <span class="algo-est" data-algo="optimal">—</span></div>
             </div>
           </button>
           <button class="algo-btn" data-algo="heuristic" type="button">
             <span class="algo-icon">⚡</span>
             <div class="algo-text">
               <div class="algo-name">Heuristic</div>
-              <div class="algo-sub">NN + 2-opt</div>
+              <div class="algo-sub">NN + 2-opt · <span class="algo-est" data-algo="heuristic">—</span></div>
             </div>
           </button>
         </div>
         <p id="algoDesc" class="algo-desc">Finds the shortest possible loop — slower for many stops.</p>
+        <p id="fetchEst" class="fetch-est"></p>
       </div>
 
       <!-- Optimize button -->
@@ -111,6 +116,18 @@
         <h3 class="admin-heading">
           <span class="admin-icon">👑</span> Admin Panel
         </h3>
+
+        <!-- Big Center subsection -->
+        <div class="big-center-box" id="bigCenterBox">
+          <div class="big-center-label">
+            🏛️ Big Center
+            <span class="big-center-state" id="bigCenterState">Not set</span>
+          </div>
+          <button id="setCenterBtn" class="btn btn-outline btn-sm btn-full admin-create-btn">
+            Set Big Center on map
+          </button>
+        </div>
+
         <div class="section-header">
           <h4 class="admin-subheading">
             Guest Accounts <span id="userCount" class="count-badge admin-count">0</span>
@@ -161,11 +178,40 @@
     </div>
   </div>
 
-  <!-- Loading overlay -->
+  <!-- Loading overlay with staged progress -->
   <div id="loadingOverlay" class="loading-overlay hidden">
-    <div class="loading-card">
-      <div class="spinner-large"></div>
-      <p id="loadingText">Calculating optimal route…</p>
+    <div class="loading-card progress-card">
+      <h3 id="loadingTitle">Optimizing route…</h3>
+
+      <div class="progress-stages">
+        <div class="stage" id="stage-fetch">
+          <span class="stage-icon">📡</span>
+          <span class="stage-text">Fetching road network</span>
+          <span class="stage-time" id="time-fetch"></span>
+          <span class="stage-status"></span>
+        </div>
+        <div class="stage" id="stage-solve">
+          <span class="stage-icon">🧮</span>
+          <span class="stage-text">Computing route</span>
+          <span class="stage-time" id="time-solve"></span>
+          <span class="stage-status"></span>
+        </div>
+        <div class="stage" id="stage-draw">
+          <span class="stage-icon">🗺️</span>
+          <span class="stage-text">Drawing on map</span>
+          <span class="stage-time" id="time-draw"></span>
+          <span class="stage-status"></span>
+        </div>
+      </div>
+
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="progressBarFill"></div>
+      </div>
+      <div class="progress-meta">
+        <span id="progressDetail">Connecting…</span>
+        <span id="progressPercent">0%</span>
+      </div>
+      <button id="cancelOptimizeBtn" class="btn btn-danger btn-sm btn-full">Cancel</button>
     </div>
   </div>
 
