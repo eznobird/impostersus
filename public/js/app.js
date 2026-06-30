@@ -180,6 +180,19 @@ function setupSidebar() {
   document.getElementById('clearRouteBtn').addEventListener('click', clearRoute);
   document.getElementById('cancelOptimizeBtn').addEventListener('click', cancelOptimize);
 
+  // Add-by-address form
+  document.getElementById('addByAddressBtn').addEventListener('click', openAddressModal);
+  document.getElementById('addressForm').addEventListener('submit', handleAddByAddress);
+  document.getElementById('addressModal').addEventListener('click', e => {
+    if (e.target.id === 'addressModal') closeAddressModal();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape'
+        && !document.getElementById('addressModal').classList.contains('hidden')) {
+      closeAddressModal();
+    }
+  });
+
   document.querySelectorAll('.traffic-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.traffic-btn').forEach(b => b.classList.remove('active'));
@@ -521,8 +534,13 @@ function updateWaypointList() {
     const isCenter  = wp.type === 'center';
     const isAdmin   = wp.ownerRole === 'admin';
     const canDel    = canRemove(wp);
+    // Untrusted fields (name, owner, id) must be escaped — they can come from
+    // any client and are rendered as HTML here.
+    const safeName  = escapeHtml(wp.name);
+    const safeOwner = escapeHtml(wp.owner);
+    const safeId    = escapeAttr(wp.id);
     const deleteBtn = canDel
-      ? `<button class="wp-delete" onclick="deleteWaypoint('${wp.id}')" title="Remove">✕</button>`
+      ? `<button class="wp-delete" onclick="deleteWaypoint('${safeId}')" title="Remove">✕</button>`
       : `<span class="wp-locked" title="Admin pin — guests can't remove">🔒</span>`;
 
     const itemClass = isCenter ? ' center-owned' : (isAdmin ? ' admin-owned' : '');
@@ -533,12 +551,12 @@ function updateWaypointList() {
       <div class="waypoint-item${itemClass}">
         <div class="wp-number${numClass}">${numContent}</div>
         <div class="wp-info">
-          <div class="wp-name" title="${wp.name}">
-            ${isCenter ? '<span class="big-center-tag">BIG CENTER</span> ' : ''}${wp.name}
+          <div class="wp-name" title="${escapeAttr(wp.name)}">
+            ${isCenter ? '<span class="big-center-tag">BIG CENTER</span> ' : ''}${safeName}
           </div>
           <div class="wp-meta">
             <span class="wp-owner ${isAdmin ? 'admin-owner' : 'guest-owner'}">
-              ${isAdmin ? '👑 ' : ''}${wp.owner}
+              ${isAdmin ? '👑 ' : ''}${safeOwner}
             </span>
           </div>
         </div>
@@ -618,10 +636,11 @@ function createMarker(wp, number) {
     socket.emit('move_waypoint', { id: wp.id, lat, lng });
   });
 
+  const safeOwner = escapeHtml(wp.owner);
   const ownerLabel = wp.ownerRole === 'admin'
-    ? `<span style="color:#b45309">👑 ${wp.owner} (ADMIN)</span>`
-    : `${wp.owner}`;
-  marker.bindTooltip(`<strong>${wp.name}</strong><br><small>by ${ownerLabel}</small>`,
+    ? `<span style="color:#b45309">👑 ${safeOwner} (ADMIN)</span>`
+    : safeOwner;
+  marker.bindTooltip(`<strong>${escapeHtml(wp.name)}</strong><br><small>by ${ownerLabel}</small>`,
                      { direction: 'top' });
   marker.addTo(map);
   return marker;
@@ -1052,7 +1071,7 @@ function showResults(order, totalSec, totalMeters, meta = {}) {
   const stopRows = order.map((idx, k) => {
     const legSec   = (k > 0 && dur) ? (dur[order[k - 1]][idx] || 0) : 0;
     const wp       = serverWaypoints[idx];
-    const short    = wp.name.split(',')[0].replace(/^🏛️\s*/, '');
+    const short    = escapeHtml(wp.name.split(',')[0].replace(/^🏛️\s*/, ''));
     const isCenter = wp.type === 'center';
     const icon     = isCenter ? '🏛️' : (wp.ownerRole === 'admin' ? '👑' : '');
     const timeTxt  = (k === 0)
@@ -1068,7 +1087,7 @@ function showResults(order, totalSec, totalMeters, meta = {}) {
   // Closing leg back to the start — its own travel time, not the cumulative total
   const returnLegSec = dur ? (dur[order[order.length - 1]][order[0]] || 0) : 0;
   const startWp   = serverWaypoints[order[0]];
-  const startName = startWp.name.split(',')[0].replace(/^🏛️\s*/, '');
+  const startName = escapeHtml(startWp.name.split(',')[0].replace(/^🏛️\s*/, ''));
   const returnRow = `
     <div class="stop-row return">
       <span class="stop-num return">↩</span>
@@ -1170,6 +1189,66 @@ async function reverseGeocodeWithCountry(lat, lng) {
 // Back-compat shim
 async function reverseGeocode(lat, lng) {
   return (await reverseGeocodeWithCountry(lat, lng)).name;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   ADD BY ADDRESS  —  type name + address, geocode, drop a pin
+════════════════════════════════════════════════════════════════ */
+function openAddressModal() {
+  document.getElementById('addrName').value = '';
+  document.getElementById('addrText').value = '';
+  document.getElementById('addressModalError').classList.add('hidden');
+  document.getElementById('addressModal').classList.remove('hidden');
+  setTimeout(() => document.getElementById('addrName').focus(), 60);
+}
+function closeAddressModal() {
+  document.getElementById('addressModal').classList.add('hidden');
+}
+window.closeAddressModal = closeAddressModal;
+
+// Forward-geocode an address, restricted to Thailand, returns {lat,lng} or null
+async function geocodeAddress(query) {
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}`
+            + `&format=json&countrycodes=th&limit=1`;
+  const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+  const arr = await res.json();
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const top = arr[0];
+  return { lat: parseFloat(top.lat), lng: parseFloat(top.lon), display: top.display_name };
+}
+
+async function handleAddByAddress(e) {
+  e.preventDefault();
+  const name  = document.getElementById('addrName').value.trim();
+  const addr  = document.getElementById('addrText').value.trim();
+  const errEl = document.getElementById('addressModalError');
+  const btn   = document.getElementById('addrSubmitBtn');
+  const txt   = document.getElementById('addrSubmitText');
+  errEl.classList.add('hidden');
+  if (!name || !addr) return;
+
+  btn.disabled = true;
+  txt.textContent = 'Searching…';
+  try {
+    const geo = await geocodeAddress(addr);
+    if (!geo || Number.isNaN(geo.lat) || Number.isNaN(geo.lng)) {
+      throw new Error('Address not found in Thailand. Try adding a city or province.');
+    }
+    if (!isInThailandBBox(geo.lat, geo.lng)) {
+      throw new Error('That address resolved outside Thailand.');
+    }
+    const id = `addr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    socket.emit('add_waypoint', { id, lat: geo.lat, lng: geo.lng, name });
+    map.setView([geo.lat, geo.lng], 15);   // pan to the new pin
+    closeAddressModal();
+    showToast(`📍 Added "${name}"`);
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    txt.textContent = 'Find & Add';
+  }
 }
 
 async function apiCall(method, endpoint, body, signal) {

@@ -39,10 +39,13 @@
       <div class="sidebar-section">
         <div class="section-header">
           <h3>Waypoints <span id="wpCount" class="count-badge">0</span></h3>
-          <button id="addModeBtn" class="btn btn-outline btn-sm">+ Add</button>
+          <div class="wp-add-btns">
+            <button id="addByAddressBtn" class="btn btn-outline btn-sm" type="button">📋 By address</button>
+            <button id="addModeBtn" class="btn btn-outline btn-sm">+ Add</button>
+          </div>
         </div>
         <div id="waypointList" class="waypoint-list">
-          <p class="empty-hint">Click "+ Add" then tap the map</p>
+          <p class="empty-hint">Click "+ Add" to tap the map, or "📋 By address" to type one</p>
         </div>
         <button id="clearAllBtn" class="btn btn-danger btn-sm btn-full hidden">
           Clear All Waypoints
@@ -148,6 +151,36 @@
   <div id="addBanner" class="add-banner hidden">
     📍 Click on the map to add a waypoint &nbsp;·&nbsp;
     <button onclick="document.getElementById('addModeBtn').click()" class="banner-cancel">Cancel (Esc)</button>
+  </div>
+
+  <!-- Add-by-address form (name + address → geocode → pin) -->
+  <div id="addressModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>📋 Add Stop by Address</h2>
+        <button class="modal-close" onclick="closeAddressModal()" type="button">✕</button>
+      </div>
+      <form id="addressForm" class="modal-form">
+        <div class="form-group">
+          <label for="addrName">Name</label>
+          <input type="text" id="addrName" autocomplete="off"
+                 placeholder="e.g. Warehouse A" maxlength="60" required>
+        </div>
+        <div class="form-group">
+          <label for="addrText">Address</label>
+          <input type="text" id="addrText" autocomplete="off"
+                 placeholder="e.g. Robinson Chanthaburi" maxlength="200" required>
+          <p class="form-hint">Searched within Thailand via OpenStreetMap.</p>
+        </div>
+        <div id="addressModalError" class="alert alert-error hidden"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" onclick="closeAddressModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="addrSubmitBtn">
+            <span id="addrSubmitText">Find &amp; Add</span>
+          </button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <!-- Create-guest modal -->

@@ -1,9 +1,11 @@
 import os
 import json
 import time
+import uuid
 import threading
 import urllib.request
 import urllib.error
+import urllib.parse
 import re
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
@@ -22,6 +24,11 @@ socketio   = SocketIO(app, cors_allowed_origins='*', async_mode=ASYNC_MODE)
 JWT_SECRET = os.environ.get('JWT_SECRET', 'tsp-dev-secret-change-in-production')
 PORT       = int(os.environ.get('PORT', 3000))
 OSRM_BASE  = 'http://router.project-osrm.org'
+NOMINATIM  = 'https://nominatim.openstreetmap.org'
+
+# Shared secret the Google Form's Apps Script must send. Set FORM_SECRET in the
+# environment (Render dashboard) and use the same value in the Apps Script.
+FORM_SECRET = os.environ.get('FORM_SECRET', 'change-this-form-secret')
 
 # At or below this many stops we do detailed per-pair routing (alternatives).
 # Above it we switch to a single fast /table call to avoid hammering OSRM.
@@ -404,6 +411,78 @@ def pairwise_matrix():
         'n':            n,
         'mode':         'pairwise'
     })
+
+
+# ── Google Form webhook (Thai address → geocode → live pin) ───────────────────
+def _nominatim_search(query):
+    """Forward-geocode a free-text address within Thailand. Returns (lat,lng,display) or None."""
+    url = (f'{NOMINATIM}/search?q={urllib.parse.quote(query)}'
+           f'&format=json&countrycodes=th&limit=1')
+    req = urllib.request.Request(url, headers={'User-Agent': 'TSP-Optimizer/1.0 (form geocoder)'})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        results = json.loads(resp.read().decode())
+    if not results:
+        return None
+    top = results[0]
+    return float(top['lat']), float(top['lon']), top.get('display_name', '')
+
+
+# Thai address fields, in the order they best help geocoding.
+THAI_ADDRESS_FIELDS = ['house_no', 'moo', 'soi', 'road', 'tambon', 'amphoe', 'province', 'postcode']
+
+
+@app.route('/api/form-submit', methods=['POST'])
+def form_submit():
+    """
+    Webhook called by the Google Form's Apps Script on each submission.
+    Body: { secret, name, house_no, moo, soi, road, tambon, amphoe, province, postcode }
+    Geocodes the Thai address and broadcasts a pin to every connected map.
+    """
+    data = request.get_json(silent=True) or {}
+
+    if data.get('secret') != FORM_SECRET:
+        return jsonify({'error': 'Invalid form secret'}), 403
+
+    name = str(data.get('name') or '').strip()[:60]
+    if not name:
+        return jsonify({'error': 'Name is required'}), 400
+
+    parts = []
+    for k in THAI_ADDRESS_FIELDS:
+        v = str(data.get(k) or '').strip()
+        if v:
+            parts.append(v)
+    if not parts:
+        return jsonify({'error': 'At least one address field is required'}), 400
+
+    query = ', '.join(parts) + ', Thailand'
+    try:
+        geo = _nominatim_search(query)
+    except (urllib.error.URLError, ValueError, KeyError) as e:
+        return jsonify({'error': f'Geocoding failed: {e}'}), 503
+
+    if not geo:
+        return jsonify({'error': 'Address not found in Thailand', 'query': query}), 404
+    lat, lng, display = geo
+    if not _in_thailand_bbox(lat, lng):
+        return jsonify({'error': 'Address resolved outside Thailand'}), 400
+
+    wp = {
+        'id':        f'form-{uuid.uuid4().hex[:12]}',
+        'lat':       lat,
+        'lng':       lng,
+        'name':      name,
+        'owner':     'Google Form',
+        'ownerRole': 'guest',     # admin can remove; guests can't (not their pin)
+        'type':      'normal',
+        'source':    'form',
+    }
+    waypoints_db[wp['id']] = wp
+    # Broadcast to every connected client (same event the UI already handles)
+    socketio.emit('waypoint_added', wp)
+
+    return jsonify({'ok': True, 'id': wp['id'], 'lat': lat, 'lng': lng,
+                    'name': name, 'matched': display})
 
 
 # ── Socket.IO real-time sync ──────────────────────────────────────────────────

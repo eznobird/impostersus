@@ -159,8 +159,10 @@ a { color: var(--primary); }
   letter-spacing: .6px; color: var(--text-muted);
 }
 .section-header {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
 }
+.wp-add-btns { display: flex; gap: 5px; flex-shrink: 0; }
+.wp-add-btns .btn { padding: 5px 9px; }
 
 /* Map */
 #map { flex: 1; z-index: 1; }
