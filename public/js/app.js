@@ -1206,15 +1206,51 @@ function closeAddressModal() {
 }
 window.closeAddressModal = closeAddressModal;
 
-// Forward-geocode an address, restricted to Thailand, returns {lat,lng} or null
-async function geocodeAddress(query) {
+// One Nominatim lookup (Thailand-first, but will accept a global hit as a
+// last resort so genuinely-typed addresses still resolve).
+async function nominatimOnce(query, thaiOnly) {
   const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}`
-            + `&format=json&countrycodes=th&limit=1`;
-  const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+            + `&format=json&limit=1${thaiOnly ? '&countrycodes=th' : ''}`;
+  const res = await fetch(url, { headers: { 'Accept-Language': 'en,th' } });
   const arr = await res.json();
   if (!Array.isArray(arr) || arr.length === 0) return null;
   const top = arr[0];
-  return { lat: parseFloat(top.lat), lng: parseFloat(top.lon), display: top.display_name };
+  const lat = parseFloat(top.lat), lng = parseFloat(top.lon);
+  if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+  return { lat, lng, display: top.display_name || query };
+}
+
+// Build progressively-broader versions of an address so that, even if the exact
+// house isn't in OpenStreetMap, we still find the street / subdistrict / town.
+function buildAddressFallbacks(query) {
+  const out = [query];
+  if (query.includes(',')) {
+    const parts = query.split(',').map(s => s.trim()).filter(Boolean);
+    for (let k = 1; k < parts.length; k++) out.push(parts.slice(k).join(', '));
+  } else {
+    const tokens = query.split(/\s+/).filter(Boolean);
+    // Drop the most-specific leading tokens (house number, soi, etc.) one by one.
+    for (let k = 1; k < tokens.length - 1; k++) out.push(tokens.slice(k).join(' '));
+  }
+  return [...new Set(out)];   // de-dupe, preserve order
+}
+
+/**
+ * Geocode an address with fallback. Returns:
+ *   { lat, lng, display, exact }   — exact=false means we broadened the search
+ *   null                           — nothing resolved at all
+ */
+async function geocodeAddress(query) {
+  const attempts = buildAddressFallbacks(query);
+  // Pass 1: Thailand-restricted, exact → broadened.
+  for (let i = 0; i < attempts.length; i++) {
+    const hit = await nominatimOnce(attempts[i], true);
+    if (hit) return { ...hit, exact: i === 0 };
+  }
+  // Pass 2 (last resort): allow a global match on the full query.
+  const global = await nominatimOnce(query, false);
+  if (global) return { ...global, exact: false };
+  return null;
 }
 
 async function handleAddByAddress(e) {
@@ -1231,17 +1267,23 @@ async function handleAddByAddress(e) {
   txt.textContent = 'Searching…';
   try {
     const geo = await geocodeAddress(addr);
-    if (!geo || Number.isNaN(geo.lat) || Number.isNaN(geo.lng)) {
-      throw new Error('Address not found in Thailand. Try adding a city or province.');
+    if (!geo) {
+      throw new Error('Couldn\'t find that location anywhere. Check the spelling, ' +
+                      'or close this and use "+ Add" to place it on the map by hand.');
     }
     if (!isInThailandBBox(geo.lat, geo.lng)) {
-      throw new Error('That address resolved outside Thailand.');
+      throw new Error('That address resolved outside Thailand. Add a Thai city or province.');
     }
     const id = `addr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     socket.emit('add_waypoint', { id, lat: geo.lat, lng: geo.lng, name });
-    map.setView([geo.lat, geo.lng], 15);   // pan to the new pin
+    map.setView([geo.lat, geo.lng], geo.exact ? 16 : 14);   // pan to the new pin
     closeAddressModal();
-    showToast(`📍 Added "${name}"`);
+    if (geo.exact) {
+      showToast(`📍 Added "${name}"`);
+    } else {
+      // We couldn't pinpoint the exact house — placed nearby, let them nudge it.
+      showToast(`📍 Added "${name}" at the closest match — drag the pin to the exact spot.`, 6000);
+    }
   } catch (err) {
     errEl.textContent = err.message;
     errEl.classList.remove('hidden');
